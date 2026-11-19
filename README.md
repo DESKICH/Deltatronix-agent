@@ -302,6 +302,7 @@ A completion that stops at `maxTokens` (`finish_reason: "length"`) fails with
 | Normalized completion | 60 KiB, leaving room for the result envelope |
 | Messages / tools / calls per assistant message | 64 / 20 / 8 |
 | Message content / tool arguments | 16 KiB / 8 KiB |
+| Tool description | 8 KiB |
 | Installed model listing | 64 KiB / 256 IDs / 200 bytes per ID |
 | Explicit context / output cap | 1 to 1,048,576 / 1 to 8,192 tokens |
 | Probe / inference timeout | 180 seconds each; earlier expiry or cancellation wins |
