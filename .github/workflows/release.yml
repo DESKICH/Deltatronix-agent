@@ -11,7 +11,22 @@ permissions:
 # `gui` build tag, so those builds run on native per-OS runners. The headless
 # binary (Docker/servers) is CGO-free and cross-compiles on one Linux job.
 jobs:
+  # The tag must name the version the binaries report, and master's tests must
+  # pass on the tagged commit, before anything is built or published.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - name: Tag matches version.go
+        run: grep -q "version = \"${GITHUB_REF_NAME#v}\"" version.go
+      - name: Test
+        run: go test ./...
+
   build-headless:
+    needs: check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -31,6 +46,7 @@ jobs:
           path: dist/*
 
   build-linux:
+    needs: check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -53,6 +69,7 @@ jobs:
           path: dist/*
 
   build-windows:
+    needs: check
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -72,6 +89,7 @@ jobs:
           path: dist/*
 
   build-macos:
+    needs: check
     runs-on: macos-latest
     strategy:
       matrix:
