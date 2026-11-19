@@ -10,7 +10,9 @@ you do not need to set up port forwarding.
 
 ## What you need
 
-- **Git and Go 1.26 or newer** to build the agent.
+- **The agent itself**: download it from
+  [Releases](https://github.com/Deltatronix/Deltatronix-agent/releases), or
+  build it from source with **Git and Go 1.26 or newer**.
 - **A local model server**, such as [Ollama](https://ollama.com/download) or
   [LM Studio](https://lmstudio.ai), with a compatible vision model installed.
 - **A Deltatronix account and pairing code** to connect the agent and receive tasks.
@@ -18,6 +20,34 @@ you do not need to set up port forwarding.
 You can build this repository on its own. Pairing and running Deltatronix tasks
 require access to the Deltatronix service. The agent does not include a model
 server or download models for you.
+
+## Download a release
+
+Each release has one file per platform:
+
+| File | Platform |
+| --- | --- |
+| `dtx-agent-darwin-arm64` | macOS, Apple silicon, desktop app |
+| `dtx-agent-darwin-amd64` | macOS, Intel, desktop app |
+| `dtx-agent-windows-amd64.exe` | Windows x64, desktop app |
+| `dtx-agent-linux-amd64` | Linux x64, desktop app |
+| `dtx-agent-linux-amd64-headless` | Linux x64, headless (servers, containers) |
+| `llm.txt` | The default settings template |
+
+The desktop builds also run headless with `run --headless`. Rename the file to
+`dtx-agent` (`dtx-agent.exe` on Windows) and make it executable on macOS and
+Linux:
+
+```sh
+mv dtx-agent-darwin-arm64 dtx-agent
+chmod +x dtx-agent
+```
+
+The binaries are not code-signed. macOS blocks a downloaded unsigned binary
+with "cannot be opened because the developer cannot be verified"; after
+checking the file came from this repository's release page, clear the
+download flag once with `xattr -d com.apple.quarantine dtx-agent`. Windows
+SmartScreen may ask you to confirm with **More info → Run anyway**.
 
 ## Build from source
 
@@ -347,6 +377,34 @@ The [`Dockerfile`](Dockerfile) builds a headless container. Mount your paired
 `config.json` and your `llm.txt` in `/home/nonroot/.config/dtx-agent/`. Set
 `backend_url` to a model server address the container can reach; inside a
 container, `localhost` refers to the container itself.
+
+### Releasing
+
+Releases are built and published by
+[`.github/workflows/release.yml`](.github/workflows/release.yml) when a `v*`
+tag is pushed. Maintainers with push access to `Deltatronix/Deltatronix-agent`:
+
+1. Set `version` in [`version.go`](version.go) to the new version (for
+   example `0.2.0`), merge that change to `master`, and pull it.
+2. Run `go test ./...` on `master`.
+3. Tag the merged commit with the same version and push the tag:
+
+   ```sh
+   git tag -a v0.2.0 -m "dtx-agent 0.2.0"
+   git push origin v0.2.0
+   ```
+
+4. The workflow refuses a tag that differs from `version.go`, runs the tests,
+   builds the six files listed under [Download a release](#download-a-release)
+   on native runners, and publishes them as the GitHub release for the tag.
+   Watch it with `gh run watch` and check the release page lists every file.
+5. On a Mac, download the `darwin-arm64` file and pair and run it once to
+   confirm it connects.
+
+No signing keys or secrets are needed: the workflow publishes with the
+repository's own `GITHUB_TOKEN`. A failed run publishes nothing; fix the cause
+on `master`, delete the tag (`git push origin :v0.2.0`, `git tag -d v0.2.0`),
+and tag again.
 
 Issues and pull requests are disabled for this repository. Developers can fork,
 clone, and build the agent, and keep their changes in their own forks.
