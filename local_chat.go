@@ -332,28 +332,41 @@ func callLocalChat(ctx context.Context, s LLMSettings, p chatPayload) (json.RawM
 	return normalized, nil
 }
 
-func probeLocalChat(ctx context.Context, s LLMSettings, installed []string) bool {
+// chatProbeMaxTokens leaves room for a thinking model (qwen3) to reason
+// before its tool call; at 128 qwen3:8b spent the whole budget reasoning.
+const chatProbeMaxTokens = 1024
+
+// probeLocalChat runs one scripted tool round on the selected model; the error
+// says why chat stays unavailable.
+func probeLocalChat(ctx context.Context, s LLMSettings, installed []string) error {
 	if !localChatSettings(s) || !slices.Contains(installed, s.ChatModel) {
-		return false
+		return errors.New("chat_model is not installed")
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, chatTimeout)
 	defer cancel()
 	var p chatPayload
-	_ = json.Unmarshal([]byte(`{"messages":[{"role":"user","content":"Call dtx_probe once with ok true. Do not answer with text."}],"tools":[{"type":"function","function":{"name":"dtx_probe","description":"Confirm tool support.","strict":true,"parameters":{"type":"object","properties":{"ok":{"type":"boolean","const":true}},"required":["ok"],"additionalProperties":false}}}],"maxTokens":128}`), &p)
+	_ = json.Unmarshal([]byte(`{"messages":[{"role":"user","content":"Call dtx_probe once with ok true. Do not answer with text."}],"tools":[{"type":"function","function":{"name":"dtx_probe","description":"Confirm tool support.","strict":true,"parameters":{"type":"object","properties":{"ok":{"type":"boolean","const":true}},"required":["ok"],"additionalProperties":false}}}]}`), &p)
 	p.Model = s.ChatModel
-	if validateChatPayload(p, s.ChatContextTokens) != nil {
-		return false
+	p.MaxTokens = chatProbeMaxTokens
+	if err := validateChatPayload(p, s.ChatContextTokens); err != nil {
+		return err
 	}
 	data, err := callLocalChat(probeCtx, s, p)
+	if err != nil {
+		return err
+	}
 	var result chatCompletion
-	if err != nil || json.Unmarshal(data, &result) != nil || len(result.Choices[0].Message.ToolCalls) != 1 {
-		return false
+	if json.Unmarshal(data, &result) != nil || len(result.Choices[0].Message.ToolCalls) != 1 {
+		return errors.New("the model answered without exactly one tool call")
 	}
 	call := result.Choices[0].Message.ToolCalls[0]
 	var args struct {
 		OK bool `json:"ok"`
 	}
-	return call.Function.Name == "dtx_probe" && decodeChatJSON([]byte(call.Function.Arguments), &args) == nil && args.OK
+	if call.Function.Name != "dtx_probe" || decodeChatJSON([]byte(call.Function.Arguments), &args) != nil || !args.OK {
+		return errors.New("the model's tool call did not match the probe")
+	}
+	return nil
 }
 
 func validToolName(name string) bool {

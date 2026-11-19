@@ -268,7 +268,9 @@ The companion advertises `llm.chat` only after listing the selected installed
 model and receiving one valid scripted tool call from it. That probe runs real
 inference, so it runs once per connection and again only after the selected
 model leaves and returns to the `/models` listing; the 60-second recheck only
-lists models. A failed probe leaves chat unavailable until the next connection.
+lists models. The probe allows 1,024 output tokens so a thinking model (for example
+`qwen3:8b`) can reason before its call. A failed probe leaves chat unavailable
+until the next connection and logs why.
 With `llm.chat`, the capabilities frame names the model and its context cap:
 
 ```json

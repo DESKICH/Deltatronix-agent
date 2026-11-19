@@ -386,7 +386,11 @@ func (a *agent) probeAndAdvertise() {
 		listed, err := probeModelsAt(probeCtx, strings.TrimRight(a.settings.BackendURL, "/"), localChatHTTP)
 		chatInstalled = err == nil && slices.Contains(listed, a.settings.ChatModel)
 		if chatInstalled && !chatProbed {
-			hasChat = probeLocalChat(probeCtx, a.settings, listed)
+			err := probeLocalChat(probeCtx, a.settings, listed)
+			hasChat = err == nil
+			if err != nil {
+				log.Printf("local chat unavailable for %s: %v", a.settings.ChatModel, err)
+			}
 		}
 	}
 	if !chatInstalled {
