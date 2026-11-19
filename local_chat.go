@@ -18,7 +18,11 @@ import (
 
 const (
 	maxChatBytes = 64 << 10
-	chatTimeout  = 180 * time.Second
+	// PCB's plan tool carries its selector catalog in its description (2.5 KiB
+	// in 2026-11); the 64 KiB assignment stays the real bound. Equal to the
+	// backend's chatJobRequestSchema limit.
+	maxChatToolDescription = 8 << 10
+	chatTimeout            = 180 * time.Second
 )
 
 type chatToolCall struct {
@@ -229,7 +233,7 @@ func validateChatPayload(p chatPayload, contextTokens int) error {
 	}
 	names := map[string]bool{}
 	for _, tool := range p.Tools {
-		if tool.Type != "function" || !tool.Function.Strict || !validToolName(tool.Function.Name) || names[tool.Function.Name] || len(tool.Function.Description) > 2048 {
+		if tool.Type != "function" || !tool.Function.Strict || !validToolName(tool.Function.Name) || names[tool.Function.Name] || len(tool.Function.Description) > maxChatToolDescription {
 			return bad
 		}
 		// Parameters pass through untouched; the browser runtime owns argument
