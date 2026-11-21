@@ -23,10 +23,12 @@ import (
 )
 
 const (
-	backoffMin   = 1 * time.Second
-	backoffMax   = 60 * time.Second
-	reprobeEvery = 60 * time.Second
+	backoffMin = 1 * time.Second
+	backoffMax = 60 * time.Second
 )
+
+// reprobeEvery is a var so a test can tick the idle loop quickly.
+var reprobeEvery = 60 * time.Second
 
 // cmdRun sets up logging, then either shows the GUI window (default) or runs the
 // headless connect loop. headless (via --headless or no display) forces the loop
