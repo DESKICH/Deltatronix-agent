@@ -419,3 +419,47 @@ and tag again.
 
 Issues and pull requests are disabled for this repository. Developers can fork,
 clone, and build the agent, and keep their changes in their own forks.
+
+### Offline Pack runtime release review (prerequisite)
+
+`go run ./cmd/pack-runtime-release` signs or verifies a **local** `pack-readonly`
+executable descriptor. It shares Shape's canonical Ed25519 signing representation,
+while Pack's descriptor fixes the domain/action (`pack.evaluate_snapshot`), Deno
+2.9.8, Pack core 0.1.0, platform, full worker-host source commit and bounded
+executable size/SHA-256. Its immutable ID covers that entire tuple. No URL, shell
+argument or task scope is accepted in a descriptor.
+
+A release operator supplies their independently reviewed key and selection:
+
+```sh
+go run ./cmd/pack-runtime-release sign \
+  --binary ./pack-readonly --platform darwin-arm64 \
+  --worker-host-commit <full-reviewed-commit> \
+  --key-id <release-key-id> --private-key <PKCS8-Ed25519-PEM> > descriptor.json
+
+go run ./cmd/pack-runtime-release verify \
+  --binary ./pack-readonly --descriptor ./descriptor.json --platform darwin-arm64 \
+  --key-id <reviewed-key-id> --public-key <reviewed-public-PEM> \
+  --artifact-id <independently-reviewed-artifact-id>
+```
+
+This tool neither generates a production key nor installs trust, downloads or
+executes a runtime, changes agent configuration or advertises a Pack capability.
+Signing records the release operator's source/build assertion; verification proves
+that assertion's signature and exact bytes, not process confinement or backend
+resource authorization. Never take trust pins from a queued task or its descriptor.
+
+The production Pack signer/key distribution, a portable confined input root and
+Companion supervision/paired job transport remain required by backend #748.
+UI #157's compiled fixture currently embeds temporary read-permission paths; it is
+local proof rather than a portable release. The optional actual fixture test is:
+
+```sh
+PACK_RUNTIME_FIXTURE_BINARY=/scratch/pack-readonly \
+PACK_RUNTIME_FIXTURE_ROOT=/scratch/input \
+  go test ./cmd/pack-runtime-release -run TestActualCompiledPackWorkerRelease -v
+```
+
+It generates a temporary test key, signs/verifies those exact compiled bytes, runs
+the asset-free evaluation and confirms its read-only receipt and unchanged input.
+No runtime, key or fixture is committed by that test.
