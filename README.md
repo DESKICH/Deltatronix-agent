@@ -433,3 +433,89 @@ and tag again.
 
 Issues and pull requests are disabled for this repository. Developers can fork,
 clone, and build the agent, and keep their changes in their own forks.
+
+### Offline Pack runtime release review (prerequisite)
+
+`go run ./cmd/pack-runtime-release` signs or verifies a **local** `pack-readonly`
+executable descriptor. It shares Shape's canonical Ed25519 signing representation,
+while Pack's descriptor fixes the domain/action (`pack.evaluate_snapshot`), Deno
+2.9.8, Pack core 0.1.0, platform, full worker-host source commit and bounded
+executable size/SHA-256. Its immutable ID covers that entire tuple. No URL, shell
+argument or task scope is accepted in a descriptor.
+
+A release operator supplies their independently reviewed key and selection:
+
+```sh
+go run ./cmd/pack-runtime-release sign \
+  --binary ./pack-readonly --platform darwin-arm64 \
+  --worker-host-commit <full-reviewed-commit> \
+  --key-id <release-key-id> --private-key <PKCS8-Ed25519-PEM> > descriptor.json
+
+go run ./cmd/pack-runtime-release verify \
+  --binary ./pack-readonly --descriptor ./descriptor.json --platform darwin-arm64 \
+  --key-id <reviewed-key-id> --public-key <reviewed-public-PEM> \
+  --artifact-id <independently-reviewed-artifact-id>
+```
+
+The sign/verify commands do not generate a production key, install trust, download
+or execute a runtime, change agent configuration or advertise a Pack capability.
+Signing records the release operator's source/build assertion; verification proves
+that assertion's signature and exact bytes, not process confinement or backend
+resource authorization. Never take trust pins from a queued task or its descriptor.
+
+Production Pack signer/key distribution and Companion paired job transport remain
+required by backend #748. UI #157 now proves standalone relative job reads after
+build-tree removal; that local proof is not a production release or access grant.
+The optional actual fixture test uses that reviewed portable build:
+
+```sh
+PACK_RUNTIME_FIXTURE_BINARY=/scratch/pack-readonly \
+PACK_RUNTIME_FIXTURE_ROOT=/scratch/input \
+  go test ./cmd/pack-runtime-release -run TestActualCompiledPackWorkerRelease -v
+```
+
+It generates a temporary test key, signs/verifies those exact compiled bytes, runs
+them through the one-shot host below and checks read-only output, foreign caller/
+tamper/cancellation refusal, unchanged source input and private-directory cleanup.
+No runtime, key or fixture is committed by that test.
+
+### Supervised local Pack fixture (prerequisite)
+
+The explicit offline `run-fixture` command executes only a signed, independently
+selected portable worker built from reviewed UI commit
+`29d7f3cf0a57dd825e499760b6d36adb4842d249`, for the current macOS/Linux platform.
+It supports asset-free `pack.evaluate_snapshot` tasks with an empty approved brief.
+It is not connected to pairing, registration, backend authorization or job claims.
+
+```sh
+go run ./cmd/pack-runtime-release run-fixture \
+  --binary ./pack-readonly --descriptor ./descriptor.json --platform darwin-arm64 \
+  --key-id <reviewed-key-id> --public-key <reviewed-public-PEM> \
+  --artifact-id <independently-reviewed-artifact-id> \
+  --input-directory <trusted-local-fixture> --principal user:caller-a
+```
+
+The trusted input contains regular `scope.json`, `task.json` and `snapshot.json`
+files in the UI worker's existing format. The host checks exact caller, project,
+PACK/revision/action/snapshot binding and raw snapshot SHA-256; asset references,
+nonempty briefs, symlinks and additional controls refuse. Metadata is capped at
+64 KiB per file, snapshot at 16 MiB and executable at 128 MiB. It detaches input
+and the verified executable into a private temporary directory, with a fixed
+`job` child, fixed arguments, no stdin and an empty child environment.
+
+The child has a five-second outer deadline. Cancellation sends an interrupt,
+then kills after a 250 ms grace period and waits for child exit before cleanup.
+Stdout/result is capped at 64 KiB and stderr at 16 KiB using the existing Shape
+bounded writer. Only a single exact `waiting_for_input`/`readOnly` result for the
+bound revision is returned; stale/writable/extra evidence refuses. The human
+summary is not parsed as snapshot provenance. Errors return no successful result,
+and the private run directory is removed on both success and failure.
+
+The reviewed compiled Deno build supplies `--allow-read=job --no-prompt` and
+deny-net/env/run/write permissions; signature verification does not independently
+inspect those permissions or attest an OS sandbox. This is a local release
+fixture operation, without privileged execution or installed trust. No hard
+memory/process-tree/container isolation is claimed. Production signer/key
+ownership, scoped paired transport and structured runtime/attempt/lease receipts
+remain required before backend execution; caller-authored local scope is not a
+backend authorization grant.

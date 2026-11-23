@@ -5,13 +5,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"crypto/ed25519"
 	"crypto/sha256"
-	"crypto/x509"
-	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +14,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/deltatronix/dtx-agent/internal/runtimeartifact"
 )
 
 const nativeReleasePublicKey = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAU4pbMm0KUIuKkVLCERYuit0E2SfeDP+vou0VJNkWfFY=\n-----END PUBLIC KEY-----\n"
@@ -26,51 +23,11 @@ const nativeReleaseKeyID = "shape-native-release-2026-11"
 
 func hashNative(data []byte) string { h := sha256.Sum256(data); return hex.EncodeToString(h[:]) }
 
-// encoding/json sorts map keys recursively; disable its HTML escaping to match
-// the release signer's compact UTF-8 JSON representation.
-func canonicalNativeJSON(v any) ([]byte, error) {
-	var out bytes.Buffer
-	encoder := json.NewEncoder(&out)
-	encoder.SetEscapeHTML(false)
-	if err := encoder.Encode(v); err != nil {
-		return nil, err
-	}
-	return bytes.TrimSuffix(out.Bytes(), []byte{'\n'}), nil
-}
+// Shared signing representation; release keys remain scoped to their domain owner.
+func canonicalNativeJSON(v any) ([]byte, error) { return runtimeartifact.CanonicalJSON(v) }
 
 func verifyNativeManifest(data []byte) (map[string]any, error) {
-	var m map[string]any
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.UseNumber()
-	if err := dec.Decode(&m); err != nil {
-		return nil, err
-	}
-	signatureObject, ok := m["signature"].(map[string]any)
-	if !ok || signatureObject["keyId"] != nativeReleaseKeyID || signatureObject["algorithm"] != "ed25519" {
-		return nil, errors.New("unknown native release key or signature")
-	}
-	signature, ok := signatureObject["valueBase64"].(string)
-	if !ok {
-		return nil, errors.New("missing native release signature")
-	}
-	delete(m, "signature")
-	signed, err := canonicalNativeJSON(m)
-	if err != nil {
-		return nil, err
-	}
-	sig, err := base64.StdEncoding.DecodeString(signature)
-	if err != nil {
-		return nil, err
-	}
-	block, _ := pem.Decode([]byte(nativeReleasePublicKey))
-	key, err := x509.ParsePKIXPublicKey(block.Bytes)
-	if err != nil {
-		return nil, err
-	}
-	if !ed25519.Verify(key.(ed25519.PublicKey), signed, sig) {
-		return nil, errors.New("invalid native runtime signature")
-	}
-	return m, nil
+	return runtimeartifact.Verify(data, nativeReleaseKeyID, nativeReleasePublicKey)
 }
 
 func nativeFetch(ctx context.Context, target, token string, max int64) ([]byte, error) {

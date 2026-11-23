@@ -17,6 +17,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/deltatronix/dtx-agent/internal/boundedoutput"
 )
 
 func TestNativePolicyRejectsMissingOrChangedLimits(t *testing.T) {
@@ -659,7 +661,7 @@ func runNativePairedFixture(t *testing.T, fixture nativePairedFixture, scenario 
 	defer cancel()
 	cmd := exec.CommandContext(ctx, exe, "-test.run=^TestNativeProcessStopCleansContainer$", "-test.v")
 	cmd.Env = append(os.Environ(), "DTX_NATIVE_STOP_CHILD=1", "DTX_NATIVE_STOP_API="+server.URL)
-	log := &boundedNativeBuffer{max: 64 << 10, overflow: cancel}
+	log := &boundedoutput.Buffer{Max: 64 << 10, Overflow: cancel}
 	cmd.Stdout = log
 	cmd.Stderr = log
 	if err := cmd.Start(); err != nil {
