@@ -33,8 +33,12 @@ func validateNativeAssembly(p *nativePayload, total int64) error {
 	if p.TargetKind != "assembly" || p.ConfigurationID != nil || !nativeIDPattern.MatchString(p.DocumentID) || !nativeIDPattern.MatchString(p.SnapshotID) || p.Version < 0 || p.SourceDocuments == nil || len(p.SourceDocuments) > 64 || !nativeHashPattern.MatchString(p.ClosureHash) {
 		return errors.New("invalid native assembly identity")
 	}
+	kind := "assembly-verify"
+	if p.ContractVersion == 4 {
+		kind = "assembly-occupancy"
+	}
 	var operation map[string]any
-	if json.Unmarshal(p.Operation, &operation) != nil || len(operation) != 1 || operation["kind"] != "assembly-verify" {
+	if json.Unmarshal(p.Operation, &operation) != nil || len(operation) != 1 || operation["kind"] != kind {
 		return errors.New("invalid native assembly operation")
 	}
 	if len(p.AssemblyLimits) != len(nativeAssemblyPolicy) {
@@ -141,8 +145,21 @@ func validateNativeAssemblySummary(p *nativePayload, summary map[string]any) err
 		}
 	}
 	states, ok := summary["states"].(map[string]any)
-	if !ok || len(states) != 0 || summary["file"] != nil {
+	if !ok || len(states) != 0 || (p.ContractVersion != 4 && summary["file"] != nil) {
 		return errors.New("assembly verification cannot return feature states or export files")
+	}
+	if p.ContractVersion == 4 {
+		if !nativeSummaryCount(summary["resultSize"], 8<<20) || summary["resultSize"].(float64) <= 0 {
+			return errors.New("invalid native occupancy result size")
+		}
+		stamp, ok := summary["microstamp"].(string)
+		if !ok || len(stamp) == 0 || len(stamp) > 128 {
+			return errors.New("invalid native occupancy microstamp")
+		}
+		file, _ := summary["file"].(map[string]any)
+		if err := validateNativeOccupancyFile(file); err != nil {
+			return err
+		}
 	}
 	assembly, ok := summary["assembly"].(map[string]any)
 	if !ok || len(assembly) != 5 || assembly["closureHash"] != p.ClosureHash || !nativeSummaryCount(assembly["occurrenceCount"], p.AssemblyLimits["maxOccurrences"]) || !nativeSummaryCount(assembly["mateCount"], p.AssemblyLimits["maxMates"]) {

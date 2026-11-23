@@ -52,7 +52,7 @@ var nativeArtifactPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
 var nativePolicy = map[string]float64{"memoryBytes": 1 << 30, "cpuQuota": 1, "pids": 64, "startupMs": 30000, "wallMs": 60000, "cancelGraceMs": 250, "maxDocumentBytes": 4 << 20, "maxAssetBytes": 32 << 20, "maxInputBytes": 64 << 20, "maxFeatures": 256, "maxWorkUnits": 250000, "maxBodies": 256, "maxTriangles": 250000, "maxOutputBytes": 8 << 20, "maxStdoutBytes": 12 << 20, "maxStderrBytes": 64 << 10}
 
 func validateNativePayload(p *nativePayload) error {
-	if p == nil || (p.ContractVersion != 1 && p.ContractVersion != 2 && p.ContractVersion != 3) || p.RequestID == "" || p.DocumentID == "" || p.Lease.ID == "" || !nativeArtifactPattern.MatchString(p.Runtime.ArtifactID) {
+	if p == nil || (p.ContractVersion != 1 && p.ContractVersion != 2 && p.ContractVersion != 3 && p.ContractVersion != 4) || p.RequestID == "" || p.DocumentID == "" || p.Lease.ID == "" || !nativeArtifactPattern.MatchString(p.Runtime.ArtifactID) {
 		return errors.New("invalid native assignment identity")
 	}
 	if len(p.Limits) != len(nativePolicy) {
@@ -88,11 +88,18 @@ func validateNativePayload(p *nativePayload) error {
 	if p.BoardCaptures != nil || p.FitLimits != nil || p.ProofHash != "" {
 		return errors.New("PCB fields require native job version3")
 	}
+	if p.ContractVersion == 4 {
+		return validateNativeOccupancy(p, total)
+	}
 	if p.ContractVersion == 2 {
 		return validateNativeAssembly(p, total)
 	}
 	if p.TargetKind != "" || p.SourceDocuments != nil || p.AssemblyLimits != nil || p.ClosureHash != "" {
 		return errors.New("assembly fields require native job version2")
+	}
+	var operation map[string]any
+	if json.Unmarshal(p.Operation, &operation) == nil && operation["kind"] == "assembly-occupancy" {
+		return errors.New("occupancy requires native job version4")
 	}
 	return nil
 }
@@ -204,7 +211,7 @@ func nativeChildManifest(p *nativePayload) map[string]any {
 		assets = append(assets, map[string]any{"hash": file.Hash, "size": file.Size})
 	}
 	manifest := map[string]any{"contractVersion": p.ContractVersion, "identity": map[string]any{"requestId": p.RequestID, "documentId": p.DocumentID, "version": p.Version}, "documentHash": p.Document.Hash, "configurationId": p.ConfigurationID, "operation": p.Operation, "limits": p.Limits, "assets": assets}
-	if p.ContractVersion == 2 {
+	if p.ContractVersion == 2 || p.ContractVersion == 4 {
 		sources := make([]map[string]any, 0, len(p.SourceDocuments))
 		for _, source := range p.SourceDocuments {
 			sources = append(sources, nativeSourceMetadata(source))
@@ -363,7 +370,7 @@ func (a *agent) runNativeJob(jobID string, p *nativePayload) {
 	}
 	var outputReceipt any
 	if file, ok := result["file"].(map[string]any); ok && file != nil {
-		receipt, err := a.uploadNativeOutput(ctx, jobID, p.Lease.ID, output, file)
+		receipt, err := a.uploadNativeOutput(ctx, jobID, p, output, file)
 		if err != nil {
 			fail(err)
 			return
@@ -478,7 +485,7 @@ func verifyNativeOutput(stdout []byte, p *nativePayload, dir string) (map[string
 			return nil, fmt.Errorf("invalid native summary %s", field)
 		}
 	}
-	if p.ContractVersion == 2 {
+	if p.ContractVersion == 2 || p.ContractVersion == 4 {
 		if err := validateNativeAssemblySummary(p, result); err != nil {
 			return nil, err
 		}
@@ -513,11 +520,65 @@ func verifyNativeOutput(stdout []byte, p *nativePayload, dir string) (map[string
 	if result["resultHash"] != hashNative(data) || result["resultSize"] != float64(len(data)) {
 		return nil, errors.New("native result hash/size mismatch")
 	}
+	if p.ContractVersion == 4 {
+		file, _ := result["file"].(map[string]any)
+		if _, err := readNativeExport(dir, file); err != nil {
+			return nil, err
+		}
+	}
 	// Child limits are checked locally; only measured container receipt crosses the wire.
 	return result, nil
 }
 
-func (a *agent) uploadNativeOutput(ctx context.Context, jobID, leaseID, dir string, file map[string]any) (map[string]any, error) {
+func (a *agent) uploadNativeOutput(ctx context.Context, jobID string, p *nativePayload, dir string, file map[string]any) (map[string]any, error) {
+	if p.ContractVersion == 4 {
+		if err := validateNativeOccupancyFile(file); err != nil {
+			return nil, err
+		}
+	}
+	data, err := readNativeExport(dir, file)
+	if err != nil {
+		return nil, err
+	}
+	var stage struct {
+		FileID      string `json:"fileId"`
+		UploadURL   string `json:"uploadUrl"`
+		ContentType string `json:"contentType"`
+	}
+	path := "/compute/shape-jobs/" + jobID
+	if err := nativeJSONRequest(ctx, a.cfg, path+"/output-upload", p.Lease.ID, file, &stage); err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, stage.UploadURL, bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	expectedMIME := map[string]string{"step": "application/step", "stl": "model/stl"}[fmt.Sprint(file["format"])]
+	if p.ContractVersion == 4 {
+		expectedMIME = "application/json"
+	}
+	if expectedMIME == "" || stage.ContentType != expectedMIME {
+		return nil, errors.New("native export upload MIME mismatch")
+	}
+	req.Header.Set("Content-Type", stage.ContentType)
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("native upload status %d", resp.StatusCode)
+	}
+	var receipt map[string]any
+	if err := nativeJSONRequest(ctx, a.cfg, path+"/output-complete", p.Lease.ID, map[string]any{"fileId": stage.FileID}, &receipt); err != nil {
+		return nil, err
+	}
+	receipt["format"] = file["format"]
+	return receipt, nil
+}
+
+func readNativeExport(dir string, file map[string]any) ([]byte, error) {
 	info, err := os.Lstat(filepath.Join(dir, "export.bin"))
 	if err != nil || !info.Mode().IsRegular() || info.Size() > 8<<20 {
 		return nil, errors.New("invalid native export file")
@@ -533,39 +594,7 @@ func (a *agent) uploadNativeOutput(ctx context.Context, jobID, leaseID, dir stri
 	if file["hash"] != hashNative(data) || file["size"] != float64(len(data)) {
 		return nil, errors.New("native export hash/size mismatch")
 	}
-	var stage struct {
-		FileID      string `json:"fileId"`
-		UploadURL   string `json:"uploadUrl"`
-		ContentType string `json:"contentType"`
-	}
-	path := "/compute/shape-jobs/" + jobID
-	if err := nativeJSONRequest(ctx, a.cfg, path+"/output-upload", leaseID, file, &stage); err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, stage.UploadURL, bytes.NewReader(data))
-	if err != nil {
-		return nil, err
-	}
-	expectedMIME := map[string]string{"step": "application/step", "stl": "model/stl"}[fmt.Sprint(file["format"])]
-	if expectedMIME == "" || stage.ContentType != expectedMIME {
-		return nil, errors.New("native export upload MIME mismatch")
-	}
-	req.Header.Set("Content-Type", stage.ContentType)
-	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("native upload status %d", resp.StatusCode)
-	}
-	var receipt map[string]any
-	if err := nativeJSONRequest(ctx, a.cfg, path+"/output-complete", leaseID, map[string]any{"fileId": stage.FileID}, &receipt); err != nil {
-		return nil, err
-	}
-	receipt["format"] = file["format"]
-	return receipt, nil
+	return data, nil
 }
 
 func boundedNativeError(err error) string {
