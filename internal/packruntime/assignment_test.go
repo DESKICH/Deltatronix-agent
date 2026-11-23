@@ -23,7 +23,7 @@ func assignmentFixture(t *testing.T) ([]byte, []byte, Principal, AssignmentAppro
 	if err != nil {
 		t.Fatal(err)
 	}
-	data, err := json.Marshal(evaluationAssignment{1, "pack.evaluate_snapshot", approval.Fence, approval.Input, taskJSON})
+	data, err := json.Marshal(EvaluationAssignment{1, "pack.evaluate_snapshot", approval.Fence, approval.Input, taskJSON})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,8 +125,8 @@ func TestAssignmentVersionZeroStillRequiresPresentNumericVersion(t *testing.T) {
 	}
 }
 
-func validateTestAssignment(data, snapshot []byte, caller Principal, approved AssignmentApproval, trust Trust) (evaluationAssignment, error) {
-	assignment, err := validateAssignmentMetadata(data, caller, approved, trust)
+func validateTestAssignment(data, snapshot []byte, caller Principal, approved AssignmentApproval, trust Trust) (EvaluationAssignment, error) {
+	assignment, err := ValidateAssignmentMetadata(data, caller, approved, trust)
 	if err != nil {
 		return assignment, err
 	}

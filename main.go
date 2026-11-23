@@ -11,8 +11,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -38,6 +40,12 @@ func main() {
 	}
 
 	switch cmd {
+	case "pack-http-fixture":
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		if err := runPackHTTPFixture(ctx, args[1:], os.Stdout); err != nil {
+			fatal(err)
+		}
 	case "pair":
 		if err := cmdPair(args[1:]); err != nil {
 			fatal(err)
@@ -84,6 +92,7 @@ Usage:
   dtx-agent pair <code> [--api https://api.deltatronix.io]
   dtx-agent pair --code-stdin [--api https://api.deltatronix.io]
   dtx-agent run [--headless]
+  dtx-agent pack-http-fixture --policy <independent-local-policy.json> (loopback only)
   dtx-agent autostart enable [--headless] [--mode xdg|systemd]
   dtx-agent autostart disable
   dtx-agent path add

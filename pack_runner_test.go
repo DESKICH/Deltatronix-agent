@@ -33,7 +33,7 @@ func approvedPackRunner(t *testing.T) (Config, packRunnerConfig) {
 		t.Fatal(err)
 	}
 	binary := []byte("synthetic signed runtime; not executable or production trust")
-	descriptor, err := packruntime.Build(bytes.NewReader(binary), runtime.GOOS+"-"+runtime.GOARCH, strings.Repeat("a", 40), "fixture", private)
+	descriptor, err := packruntime.Build(bytes.NewReader(binary), runtime.GOOS+"-"+runtime.GOARCH, packruntime.PortableWorkerHostCommit, "fixture", private)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,8 +70,8 @@ func writePackApproval(t *testing.T, approval packRunnerConfig) {
 }
 func TestPackRegistrationRequiresIndependentApprovalAndVerifiedBytes(t *testing.T) {
 	cfg, approval := approvedPackRunner(t)
-	registration, err := loadPackRegistration(cfg)
-	if err != nil || registration == nil || registration.Runtime.Version != "2.9.8" {
+	registration, err := loadPackRunner(cfg)
+	if err != nil || registration == nil || registration.registration.Runtime.Version != "2.9.8" {
 		t.Fatalf("verified registration: %v", err)
 	}
 	for name, change := range map[string]func(*packRunnerConfig){"pairing": func(c *packRunnerConfig) { c.AgentID = "foreign" }, "api": func(c *packRunnerConfig) { c.APIURL = "https://foreign.invalid" }, "projects": func(c *packRunnerConfig) { c.ProjectIDs = []string{"project-a", "project-a"} }, "pin": func(c *packRunnerConfig) { c.ArtifactID = "unapproved" }, "signer": func(c *packRunnerConfig) { c.KeyID = "unapproved" }, "relative": func(c *packRunnerConfig) { c.Binary = "worker" }} {
@@ -79,7 +79,7 @@ func TestPackRegistrationRequiresIndependentApprovalAndVerifiedBytes(t *testing.
 			bad := approval
 			change(&bad)
 			writePackApproval(t, bad)
-			if _, err := loadPackRegistration(cfg); err == nil {
+			if _, err := loadPackRunner(cfg); err == nil {
 				t.Fatal("unapproved registration accepted")
 			}
 		})
@@ -88,23 +88,24 @@ func TestPackRegistrationRequiresIndependentApprovalAndVerifiedBytes(t *testing.
 	if err := os.WriteFile(approval.Binary, []byte("changed"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadPackRegistration(cfg); err == nil {
+	if _, err := loadPackRunner(cfg); err == nil {
 		t.Fatal("tampered executable accepted")
 	}
 	dir, _ := agentConfigDir()
 	if err := os.Remove(filepath.Join(dir, "pack-runner.json")); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := loadPackRegistration(cfg); err != nil || got != nil {
+	if got, err := loadPackRunner(cfg); err != nil || got != nil {
 		t.Fatal("legacy profile must remain disabled")
 	}
 }
 func TestPackRegistrationAcknowledgementIsExactAndRefusalClears(t *testing.T) {
 	cfg, _ := approvedPackRunner(t)
-	expected, err := loadPackRegistration(cfg)
+	selection, err := loadPackRunner(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
+	expected := &selection.registration
 	a := agent{packRegistration: expected}
 	send := func(kind string, r *runnerRegistration) {
 		b, _ := json.Marshal(map[string]any{"type": kind, "registration": r})

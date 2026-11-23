@@ -603,3 +603,35 @@ actor/resource access, current snapshot/attempt/expiry, release approval and
 atomic settlement. No production job dispatch or registration behavior changes.
 Historical offline fixtures without an optional artifact revision remain valid;
 when supplied, the numeric artifact revision must match their scope.
+
+### Loopback paired HTTP fixture command (prerequisite)
+
+`dtx-agent pack-http-fixture --policy <independent-policy.json>` exercises one
+known job against the private, unattached Backend Pack HTTP controller. It
+requires an explicit isolated `DTX_AGENT_CONFIG_DIR`, its existing paired
+`config.json`, and independently approved `pack-runner.json` signed-runtime
+selection. Only a literal loopback API origin is accepted; DNS names, alternate
+paths, URL credentials/query/fragments, redirects and environment proxies are
+refused. It cannot target the public API or enable a daemon job handler.
+
+The local policy shape is `{ "jobId": "known-job", "attempt": 1, "input": ... }`,
+where `input` contains the independently approved user/project/Pack, explicit
+saved numeric version, snapshot ID, SHA-256 and raw byte size from the v1 wire.
+The project must also appear in the local runner approval. No request or server
+response can select a new runtime, signer, actor, resource or saved input.
+
+The command uses the existing paired Bearer token to claim only that job, checks
+its exact input/job/attempt/agent/runtime and live lease, fetches bounded exact
+snapshot bytes, and verifies measured length/hash. It renews once and adopts only
+the same identity/lease with a nonshortened, bounded live expiry. The existing
+`RunAssignment` supervisor then produces the read-only result. The command posts
+it once with `X-Pack-Lease`, and prints it only after the server returns 204.
+Claim/result requests are never automatically retried. A network error can leave
+a claimed job requiring the existing server lease-expiry/recovery owner; this
+command adds no retry/lease state machine or automatic re-enqueue.
+
+The daemon's registration and legacy Shape/chat/vision paths remain unchanged.
+The Backend controller is not mounted in production, and its service has no
+default execution policy. This fixture command is not deployed host acceptance,
+production runtime distribution, paid execution, document saving, hard process
+memory confinement or final engineering readiness.
