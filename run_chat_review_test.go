@@ -321,7 +321,7 @@ func TestPairedChatInitialProbeUsesLatestConfig(t *testing.T) {
 	}
 	// A real early job refusal acknowledges that the preceding config was read.
 	writeChatFixtureJob(t, ctx, conn, "before-readiness")
-	if reply := readChatResult(t, ctx, conn, "before-readiness"); reply.OK || !strings.HasPrefix(reply.Error, "CHAT_MODEL_UNAVAILABLE") {
+	if reply := readChatResult(t, ctx, conn, "before-readiness"); reply.OK || !strings.HasPrefix(reply.Error, "CHAT_PROBE_PENDING") {
 		t.Fatal("job before verified readiness must be refused")
 	}
 	close(release)
