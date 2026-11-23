@@ -150,10 +150,11 @@ type agent struct {
 	visionModels   []string
 	configRevision uint64
 	configured     bool
-	advertised     bool // whether a capabilities frame has been sent this connection
-	lastCap        bool // last advertised llm.vision state
-	chatReady      bool // last advertised llm.chat state; gates chat admission
-	chatProbed     bool // chatReady holds a tool-probe result for the installed model
+	advertised     bool    // whether a capabilities frame has been sent this connection
+	lastCap        bool    // last advertised llm.vision state
+	chatReady      bool    // last advertised llm.chat state; gates chat admission
+	chatProbed     bool    // chatReady holds a tool-probe result for the installed model
+	bytesPerToken  float64 // the chat model's measured request bytes per token
 	hintShown      bool
 	busy           bool
 	nativeLeases   map[string]nativeLease
@@ -303,7 +304,10 @@ func (a *agent) dispatch(data []byte) {
 		}
 	}
 	if jobType == "LLM_CHAT_TOOLS" || header.Type == "LLM_CHAT_TOOLS" {
-		job, err := decodeChatAssignment(data, a.settings)
+		a.mu.Lock()
+		bytesPerToken := a.bytesPerToken
+		a.mu.Unlock()
+		job, err := decodeChatAssignment(data, a.settings, bytesPerToken)
 		if err != nil {
 			reject(err.Error())
 			return
@@ -373,7 +377,7 @@ func (a *agent) probeAndAdvertise() {
 	}
 	models := a.visionModels
 	revision := a.configRevision
-	hasChat, chatProbed := a.chatReady, a.chatProbed
+	hasChat, chatProbed, bytesPerToken := a.chatReady, a.chatProbed, a.bytesPerToken
 	a.mu.Unlock()
 
 	probeCtx, cancel := context.WithTimeout(a.ctx, chatTimeout)
@@ -388,8 +392,8 @@ func (a *agent) probeAndAdvertise() {
 		listed, err := probeModelsAt(probeCtx, strings.TrimRight(a.settings.BackendURL, "/"), localChatHTTP)
 		chatInstalled = err == nil && slices.Contains(listed, a.settings.ChatModel)
 		if chatInstalled && !chatProbed {
-			err := probeLocalChat(probeCtx, a.settings, listed)
-			hasChat = err == nil
+			ratio, err := probeLocalChat(probeCtx, a.settings, listed)
+			hasChat, bytesPerToken = err == nil, ratio
 			if err != nil {
 				log.Printf("local chat unavailable for %s: %v", a.settings.ChatModel, err)
 			}
@@ -446,6 +450,7 @@ func (a *agent) probeAndAdvertise() {
 	a.lastCap = has
 	a.chatReady = hasChat
 	a.chatProbed = chatInstalled
+	a.bytesPerToken = bytesPerToken
 	a.nativeCap = nativeAvailable
 	a.advertised = true
 	a.mu.Unlock()
@@ -453,7 +458,7 @@ func (a *agent) probeAndAdvertise() {
 	if !changed {
 		return
 	}
-	frame := map[string]any{"type": "capabilities"}
+	frame := map[string]any{"type": "capabilities", "version": version}
 	caps := []string{}
 	if has {
 		caps = []string{"llm.vision"}
@@ -461,7 +466,7 @@ func (a *agent) probeAndAdvertise() {
 	if hasChat {
 		caps = append(caps, "llm.chat")
 		// A dispatcher needs the exact model and context cap to build a job.
-		frame["chat"] = map[string]any{"model": a.settings.ChatModel, "contextTokens": a.settings.ChatContextTokens}
+		frame["chat"] = map[string]any{"model": a.settings.ChatModel, "contextTokens": a.settings.ChatContextTokens, "bytesPerToken": bytesPerToken}
 	}
 	if nativeAvailable {
 		caps = append(caps, "shape.native.v1", "shape.assembly.v1", "shape.pcb-fit.v1")
@@ -487,6 +492,13 @@ func (a *agent) cancelJob(jobID string) {
 // to the read loop, so an immediately following job.cancel cannot miss the job.
 func (a *agent) runJob(jobID string, p *VisionPayload, chatJob *chatAssignment) {
 	a.mu.Lock()
+	if chatJob != nil && !a.advertised {
+		// The backend restores llm.chat on reconnect, before this connection's
+		// tool probe (up to chatTimeout) has answered.
+		a.mu.Unlock()
+		a.send(resultFrame(jobID, nil, "CHAT_PROBE_PENDING: the companion is still checking its local model; try again in a minute"))
+		return
+	}
 	if chatJob != nil && !a.chatReady {
 		a.mu.Unlock()
 		a.send(resultFrame(jobID, nil, "CHAT_MODEL_UNAVAILABLE: configure and verify the selected local model first"))

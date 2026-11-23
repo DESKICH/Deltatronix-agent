@@ -17,10 +17,10 @@ func TestChatToolDescriptionBound(t *testing.T) {
 		return p
 	}
 	// PCB's plan tool description is 2529 bytes.
-	if err := validateChatPayload(payload(strings.Repeat("x", 2529)), 131072); err != nil {
+	if err := validateChatPayload(payload(strings.Repeat("x", 2529)), 131072, 1); err != nil {
 		t.Fatalf("plan tool refused: %v", err)
 	}
-	if err := validateChatPayload(payload(strings.Repeat("x", maxChatToolDescription+1)), 131072); err == nil {
+	if err := validateChatPayload(payload(strings.Repeat("x", maxChatToolDescription+1)), 131072, 1); err == nil {
 		t.Fatal("over-limit description accepted")
 	}
 }
