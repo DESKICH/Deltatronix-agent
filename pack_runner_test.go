@@ -150,21 +150,43 @@ func TestPackRegistrationUsesActualPairedSocketAndReverifiesOnReconnect(t *testi
 			return
 		}
 		defer conn.CloseNow()
-		for {
-			var frame struct {
-				Type         string             `json:"type"`
-				Registration runnerRegistration `json:"registration"`
+		incoming := make(chan json.RawMessage, 1)
+		go func() {
+			var frame json.RawMessage
+			if wsjson.Read(ctx, conn, &frame) == nil {
+				incoming <- frame
 			}
-			if err := wsjson.Read(ctx, conn, &frame); err != nil {
-				return
-			}
-			if frame.Type == "runner.register" {
-				frames <- frame.Registration
-				_ = wsjson.Write(ctx, conn, map[string]any{"type": "runner.registered", "registration": frame.Registration})
-				_ = conn.Close(websocket.StatusGoingAway, "fixture reconnect")
-				return
-			}
+		}()
+		select {
+		case <-incoming:
+			t.Error("client sent a frame before authenticated config")
+			return
+		case <-time.After(30 * time.Millisecond):
 		}
+		if err := wsjson.Write(ctx, conn, map[string]any{"type": "config", "visionModels": []string{}}); err != nil {
+			return
+		}
+		var first json.RawMessage
+		select {
+		case first = <-incoming:
+		case <-ctx.Done():
+			return
+		}
+		var initial struct {
+			Type         string             `json:"type"`
+			Registration runnerRegistration `json:"registration"`
+		}
+		if json.Unmarshal(first, &initial) != nil || initial.Type != "runner.register" {
+			if initial.Type == "capabilities" {
+				return
+			}
+			t.Error("first configured frame was not registration")
+			return
+		}
+		frames <- initial.Registration
+		_ = wsjson.Write(ctx, conn, map[string]any{"type": "runner.registered", "registration": initial.Registration})
+		_ = conn.Close(websocket.StatusGoingAway, "fixture reconnect")
+		return
 	}))
 	defer server.Close()
 	for i := 0; i < 2; i++ {

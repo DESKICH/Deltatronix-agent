@@ -224,7 +224,6 @@ func serve(parent context.Context, cfg Config, url string) (connected bool, err 
 	}
 	a := &agent{nativeReady: recoveryErr == nil, cfg: cfg, conn: conn, ctx: ctx, settings: loadLLMSettings(), jobs: map[string]context.CancelFunc{}, probeRequested: make(chan struct{}, 1)}
 	defer func() { cancel(); a.jobsWG.Wait() }()
-	a.registerPackRunner()
 	a.launchJob(a.reprobeLoop)
 
 	for {
@@ -345,10 +344,15 @@ func (a *agent) dispatch(data []byte) {
 
 func (a *agent) onConfig(visionModels []string) {
 	a.mu.Lock()
+	firstConfig := !a.configured
 	a.visionModels = visionModels
 	a.configRevision++
 	a.configured = true
 	a.mu.Unlock()
+	// The server config follows authenticated gateway listener installation.
+	if firstConfig {
+		a.registerPackRunner()
+	}
 	select {
 	case a.probeRequested <- struct{}{}:
 	default:

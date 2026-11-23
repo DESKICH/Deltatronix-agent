@@ -542,7 +542,7 @@ server frame, descriptor or pairing response. Its shape is:
 ```
 
 Use private local profile permissions. There is no installed production signer,
-release selection or enabled configuration. On each connection, the daemon
+release selection or enabled configuration. After the first authenticated server config on each connection, the daemon
 checks exact pairing API/agent identity, 1–16 distinct project IDs, the signature,
 independent artifact pin, current OS/architecture, executable hash/length and
 pinned Deno/Pack versions through the existing release verifier. Only then does
