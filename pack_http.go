@@ -3,8 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -24,7 +22,7 @@ import (
 )
 
 // Local fixture policy is independent of the paired server's job payload. No
-// default, daemon polling, production URL or automatically trusted task exists.
+// default remote approval, daemon polling or automatically trusted task exists.
 type packHTTPPolicy struct {
 	JobID   string                      `json:"jobId"`
 	Attempt int64                       `json:"attempt"`
@@ -48,19 +46,22 @@ func decodePackHTTP(data []byte, out any) error {
 	}
 	return nil
 }
-func packFixtureBase(cfg Config) (string, error) {
+func packFixtureBase(cfg Config, approvedAPI string) (string, error) {
 	u, err := url.Parse(cfg.APIURL)
 	if err != nil || u == nil || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") || u.RawPath != "" {
-		return "", errors.New("Pack HTTP fixture requires an exact loopback API origin")
+		return "", errors.New("Pack HTTP fixture requires loopback or explicitly approved canonical HTTPS API")
 	}
+	base := strings.TrimRight(u.String(), "/")
 	ip := net.ParseIP(u.Hostname())
-	if ip == nil || !ip.IsLoopback() {
-		return "", errors.New("Pack HTTP fixture requires an exact loopback API origin")
+	local := ip != nil && ip.IsLoopback() && approvedAPI == ""
+	approved := approvedAPI == defaultAPI && base == defaultAPI
+	if !local && !approved {
+		return "", errors.New("Pack HTTP fixture requires loopback or explicitly approved canonical HTTPS API")
 	}
 	if cfg.AgentID == "" || cfg.AgentToken == "" {
 		return "", errors.New("Pack HTTP fixture requires existing isolated pairing")
 	}
-	return strings.TrimRight(u.String(), "/"), nil
+	return base, nil
 }
 func validatePackHTTPPolicy(data []byte, selection *packRunnerSelection) (packHTTPPolicy, error) {
 	var policy packHTTPPolicy
@@ -102,6 +103,67 @@ func packHTTPAssignment(data []byte, policy packHTTPPolicy, cfg Config, selectio
 	return validated, approval, err
 }
 
+type pairedPackHTTP struct {
+	client   *http.Client
+	endpoint string
+	token    string
+	input    packruntime.EvaluationInput
+}
+
+func (control *pairedPackHTTP) request(ctx context.Context, method, path, lease string, body []byte, status int, limit int64) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, method, control.endpoint+path, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+control.token)
+	if path == "/input" {
+		req.Header.Set("Accept-Encoding", "identity")
+	}
+	if lease != "" {
+		req.Header.Set("X-Pack-Lease", lease)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	response, err := control.client.Do(req)
+	if err != nil {
+		return nil, errors.New("Pack fixture request failed; no automatic retry")
+	}
+	defer response.Body.Close()
+	if response.StatusCode != status {
+		return nil, fmt.Errorf("Pack fixture request refused (%d); no automatic retry", response.StatusCode)
+	}
+	coding := strings.TrimSpace(strings.Join(response.Header.Values("Content-Encoding"), ","))
+	if response.Uncompressed || (coding != "" && !strings.EqualFold(coding, "identity")) {
+		return nil, errors.New("Pack fixture refuses encoded responses")
+	}
+	noStore := false
+	for _, directive := range strings.Split(response.Header.Get("Cache-Control"), ",") {
+		if strings.EqualFold(strings.TrimSpace(directive), "no-store") {
+			noStore = true
+		}
+	}
+	if !noStore {
+		return nil, errors.New("Pack fixture response must be no-store")
+	}
+	if path == "/input" && response.ContentLength >= 0 && response.ContentLength != control.input.ByteSize {
+		return nil, errors.New("Pack fixture input length differs")
+	}
+	bytes, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(bytes)) > limit {
+		return nil, errors.New("Pack fixture response exceeds limit")
+	}
+	if path == "/input" {
+		if err := packruntime.ValidateSnapshotBytes(bytes, control.input); err != nil {
+			return nil, err
+		}
+	}
+	return bytes, nil
+}
+
 func runPackHTTPFixture(ctx context.Context, args []string, out io.Writer) (err error) {
 	// Requiring an explicit profile prevents this experimental command from
 	// accidentally claiming work with the user's ordinary desktop credentials.
@@ -111,6 +173,7 @@ func runPackHTTPFixture(ctx context.Context, args []string, out io.Writer) (err 
 	flags := flag.NewFlagSet("pack-http-fixture", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	policyPath := flags.String("policy", "", "independently approved local known-job/input policy JSON")
+	approvedAPI := flags.String("approve-api", "", "explicit canonical HTTPS API approval; must match isolated profile")
 	if flags.Parse(args) != nil || flags.NArg() != 0 || *policyPath == "" {
 		return errors.New("use pack-http-fixture --policy <independent-local-policy.json>")
 	}
@@ -118,7 +181,7 @@ func runPackHTTPFixture(ctx context.Context, args []string, out io.Writer) (err 
 	if err != nil {
 		return errors.New("isolated fixture pairing unavailable")
 	}
-	base, err := packFixtureBase(cfg)
+	base, err := packFixtureBase(cfg, *approvedAPI)
 	if err != nil {
 		return err
 	}
@@ -136,44 +199,12 @@ func runPackHTTPFixture(ctx context.Context, args []string, out io.Writer) (err 
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	client := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{Proxy: nil}, CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+	client := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{Proxy: nil, DisableCompression: true}, CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 		return errors.New("Pack HTTP fixture refuses redirects")
 	}}
 	defer client.CloseIdleConnections()
-	endpoint := base + "/compute/pack-jobs/" + policy.JobID
-	request := func(method, path, lease string, body []byte, status int, limit int64) ([]byte, error) {
-		req, err := http.NewRequestWithContext(ctx, method, endpoint+path, bytes.NewReader(body))
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Authorization", "Bearer "+cfg.AgentToken)
-		if lease != "" {
-			req.Header.Set("X-Pack-Lease", lease)
-		}
-		if body != nil {
-			req.Header.Set("Content-Type", "application/json")
-		}
-		response, err := client.Do(req)
-		if err != nil {
-			return nil, errors.New("Pack fixture request failed; no automatic retry")
-		}
-		defer response.Body.Close()
-		if response.StatusCode != status {
-			return nil, fmt.Errorf("Pack fixture request refused (%d); no automatic retry", response.StatusCode)
-		}
-		if path == "/input" && response.ContentLength != policy.Input.ByteSize {
-			return nil, errors.New("Pack fixture input length differs")
-		}
-		bytes, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
-		if err != nil {
-			return nil, err
-		}
-		if int64(len(bytes)) > limit {
-			return nil, errors.New("Pack fixture response exceeds limit")
-		}
-		return bytes, nil
-	}
-	claimed, err := request(http.MethodPost, "/claim", "", nil, 200, packHTTPMetadataBytes)
+	control := pairedPackHTTP{client: client, endpoint: base + "/compute/pack-jobs/" + policy.JobID, token: cfg.AgentToken, input: policy.Input}
+	claimed, err := control.request(ctx, http.MethodPost, "/claim", "", nil, 200, packHTTPMetadataBytes)
 	if err != nil {
 		return err
 	}
@@ -181,16 +212,11 @@ func runPackHTTPFixture(ctx context.Context, args []string, out io.Writer) (err 
 	if err != nil {
 		return err
 	}
-	snapshot, err := request(http.MethodGet, "/input", assignment.Fence.LeaseID, nil, 200, policy.Input.ByteSize)
+	snapshot, err := control.request(ctx, http.MethodGet, "/input", assignment.Fence.LeaseID, nil, 200, policy.Input.ByteSize)
 	if err != nil {
 		return err
 	}
-	// Validate all raw bytes before renewing or staging the supervised input.
-	sum := sha256.Sum256(snapshot)
-	if int64(len(snapshot)) != policy.Input.ByteSize || hex.EncodeToString(sum[:]) != policy.Input.ContentHash {
-		return errors.New("Pack fixture input hash/length differs")
-	}
-	renewed, err := request(http.MethodPost, "/renew", assignment.Fence.LeaseID, nil, 200, packHTTPMetadataBytes)
+	renewed, err := control.request(ctx, http.MethodPost, "/renew", assignment.Fence.LeaseID, nil, 200, packHTTPMetadataBytes)
 	if err != nil {
 		return err
 	}
@@ -219,7 +245,7 @@ func runPackHTTPFixture(ctx context.Context, args []string, out io.Writer) (err 
 	if time.Now().UnixMilli() >= current.Fence.ExpiresAt {
 		return errors.New("Pack fixture lease expired before result submission")
 	}
-	if _, err := request(http.MethodPost, "/result", current.Fence.LeaseID, result, 204, 0); err != nil {
+	if _, err := control.request(ctx, http.MethodPost, "/result", current.Fence.LeaseID, result, 204, 0); err != nil {
 		return err
 	}
 	_, err = fmt.Fprintln(out, string(result))

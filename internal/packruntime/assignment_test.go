@@ -130,7 +130,7 @@ func validateTestAssignment(data, snapshot []byte, caller Principal, approved As
 	if err != nil {
 		return assignment, err
 	}
-	return assignment, validateAssignmentSnapshot(snapshot, assignment.Input)
+	return assignment, ValidateSnapshotBytes(snapshot, assignment.Input)
 }
 func TestAssignmentRefusesCallerAndPinBeforeOpeningSnapshot(t *testing.T) {
 	data, _, caller, approval, trust := assignmentFixture(t)

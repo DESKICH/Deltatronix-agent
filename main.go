@@ -92,7 +92,7 @@ Usage:
   dtx-agent pair <code> [--api https://api.deltatronix.io]
   dtx-agent pair --code-stdin [--api https://api.deltatronix.io]
   dtx-agent run [--headless]
-  dtx-agent pack-http-fixture --policy <independent-local-policy.json> (loopback only)
+  dtx-agent pack-http-fixture --policy <independent-local-policy.json> [--approve-api https://api.deltatronix.io]
   dtx-agent autostart enable [--headless] [--mode xdg|systemd]
   dtx-agent autostart disable
   dtx-agent path add

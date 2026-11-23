@@ -604,15 +604,19 @@ atomic settlement. No production job dispatch or registration behavior changes.
 Historical offline fixtures without an optional artifact revision remain valid;
 when supplied, the numeric artifact revision must match their scope.
 
-### Loopback paired HTTP fixture command (prerequisite)
+### Explicit paired HTTP fixture command (prerequisite)
 
 `dtx-agent pack-http-fixture --policy <independent-policy.json>` exercises one
 known job against the private, unattached Backend Pack HTTP controller. It
 requires an explicit isolated `DTX_AGENT_CONFIG_DIR`, its existing paired
 `config.json`, and independently approved `pack-runner.json` signed-runtime
-selection. Only a literal loopback API origin is accepted; DNS names, alternate
-paths, URL credentials/query/fragments, redirects and environment proxies are
-refused. It cannot target the public API or enable a daemon job handler.
+selection. A literal loopback API origin remains the default. To select the
+project's canonical HTTPS API, an operator must also pass
+`--approve-api https://api.deltatronix.io`, exactly matching the isolated profile.
+The existing canonical `defaultAPI` owns that hostname. Other remote hosts/ports,
+alternate paths, URL credentials/query/fragments, redirects and environment
+proxies are refused. No daemon job handler or backend policy is enabled by the
+flag. This source change does not connect to the live API.
 
 The local policy shape is `{ "jobId": "known-job", "attempt": 1, "input": ... }`,
 where `input` contains the independently approved user/project/Pack, explicit
@@ -622,7 +626,12 @@ response can select a new runtime, signer, actor, resource or saved input.
 
 The command uses the existing paired Bearer token to claim only that job, checks
 its exact input/job/attempt/agent/runtime and live lease, fetches bounded exact
-snapshot bytes, and verifies measured length/hash. It renews once and adopts only
+snapshot bytes, and verifies measured length/hash. Input requests ask for
+`Accept-Encoding: identity`; automatic decompression is disabled, unexpected
+content coding is refused, and private responses must say `no-store`. A known
+transport length must match. Chunked/unknown length is accepted only after a
+bounded read proves the same exact raw byte count and SHA-256; headers alone are
+never byte proof. It renews once and adopts only
 the same identity/lease with a nonshortened, bounded live expiry. The existing
 `RunAssignment` supervisor then produces the read-only result. The command posts
 it once with `X-Pack-Lease`, and prints it only after the server returns 204.
