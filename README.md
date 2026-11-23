@@ -295,8 +295,16 @@ Tools use OpenAI function descriptors with `strict: true` and an object
 owns argument validation. The companion checks only that each tool call names an
 advertised tool and carries a JSON object of at most 8 KiB; arguments of the
 wrong type reach the browser, which returns a recoverable refusal to the model.
+A call that fails the companion's check does not fail the job: the model sees
+why as that call's tool error. A round with valid calls returns only those, and
+the refused calls rejoin the round, with their errors, when a later job of the
+turn replays it (kept in memory for one hour). A round with no valid call is
+answered with its errors and asked again, at most twice, before the job fails
+with `CHAT_INVALID_TOOL_CALL`.
 A completion that stops at `maxTokens` (`finish_reason: "length"`) fails with
-`CHAT_TRUNCATED`.
+`CHAT_TRUNCATED`. A job whose model does not finish within its time limit fails
+with `CHAT_LOCAL_TIMEOUT`; an assignment that arrives already expired fails with
+`CHAT_EXPIRED`, the code the backend also uses for a job never picked up.
 
 | Limit | Bound |
 | --- | --- |

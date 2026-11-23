@@ -529,14 +529,15 @@ func (a *agent) executeJob(jobID string, p *VisionPayload, chatJob *chatAssignme
 
 	a.send(map[string]any{"type": "job.accept", "jobId": jobID})
 	if chatJob != nil {
-		ctx, stop := context.WithTimeout(jctx, min(time.Until(chatJob.ExpiresAt), chatTimeout))
+		limit := min(time.Until(chatJob.ExpiresAt), chatTimeout)
+		ctx, stop := context.WithTimeout(jctx, limit)
 		defer stop()
 		installed, err := probeModelsAt(ctx, strings.TrimRight(a.settings.BackendURL, "/"), localChatHTTP)
 		var result json.RawMessage
 		if err != nil || !slices.Contains(installed, chatJob.Payload.Model) {
 			err = errors.New("CHAT_MODEL_UNAVAILABLE: selected model is no longer installed")
 		} else {
-			result, err = callLocalChat(ctx, a.settings, chatJob.Payload)
+			result, err = runLocalChat(ctx, a.settings, chatJob.Payload)
 		}
 		// Completion and job.cancel share the same transition under a.mu.
 		terminalErr := finish(ctx)
@@ -544,7 +545,9 @@ func (a *agent) executeJob(jobID string, p *VisionPayload, chatJob *chatAssignme
 			err = errors.New("CHAT_CANCELLED: request cancelled")
 		}
 		if errors.Is(terminalErr, context.DeadlineExceeded) {
-			err = errors.New("CHAT_EXPIRED: request deadline elapsed")
+			// The device took the job; its model ran out of time. The backend's
+			// CHAT_EXPIRED means the job was never picked up.
+			err = fmt.Errorf("CHAT_LOCAL_TIMEOUT: the local model did not finish within %d s", int(limit.Round(time.Second)/time.Second))
 		}
 		if err != nil {
 			a.send(resultFrame(jobID, nil, err.Error()))
