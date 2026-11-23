@@ -31,32 +31,32 @@ func assignmentFixture(t *testing.T) ([]byte, []byte, Principal, AssignmentAppro
 }
 func TestAssignmentBindsIndependentCurrentFenceInputAndRuntime(t *testing.T) {
 	data, snapshot, caller, approval, trust := assignmentFixture(t)
-	if _, err := validateAssignment(data, snapshot, caller, approval, trust); err != nil {
+	if _, err := validateTestAssignment(data, snapshot, caller, approval, trust); err != nil {
 		t.Fatal(err)
 	}
 	for name, change := range map[string]func(*AssignmentApproval){"lease": func(p *AssignmentApproval) { p.Fence.LeaseID = "changed" }, "attempt": func(p *AssignmentApproval) { p.Fence.Attempt++ }, "agent": func(p *AssignmentApproval) { p.Fence.AgentID = "foreign" }, "actor": func(p *AssignmentApproval) { p.Input.UserID = "foreign" }, "project": func(p *AssignmentApproval) { p.Input.ProjectID = "foreign" }, "pack": func(p *AssignmentApproval) { p.Input.PackID = "foreign" }, "version": func(p *AssignmentApproval) { p.Input.Version++ }, "snapshot": func(p *AssignmentApproval) { p.Input.SnapshotID = "changed" }, "runtime": func(p *AssignmentApproval) { p.Fence.RuntimeID = "pack-readonly-v1-" + strings.Repeat("b", 64) }, "expiry": func(p *AssignmentApproval) { p.Fence.ExpiresAt++ }, "length": func(p *AssignmentApproval) { p.Input.ByteSize++ }} {
 		t.Run(name, func(t *testing.T) {
 			changed := approval
 			change(&changed)
-			if _, err := validateAssignment(data, snapshot, caller, changed, trust); err == nil {
+			if _, err := validateTestAssignment(data, snapshot, caller, changed, trust); err == nil {
 				t.Fatal("mismatched approved pins accepted")
 			}
 		})
 	}
-	if _, err := validateAssignment(data, snapshot, Principal{"company", caller.ID}, approval, trust); err == nil {
+	if _, err := validateTestAssignment(data, snapshot, Principal{"company", caller.ID}, approval, trust); err == nil {
 		t.Fatal("foreign caller accepted")
 	}
-	if _, err := validateAssignment(data, append(snapshot, 0), caller, approval, trust); err == nil {
+	if _, err := validateTestAssignment(data, append(snapshot, 0), caller, approval, trust); err == nil {
 		t.Fatal("changed bytes accepted")
 	}
-	if _, err := validateAssignment(data, snapshot, caller, approval, Trust{ArtifactID: "unapproved"}); err == nil {
+	if _, err := validateTestAssignment(data, snapshot, caller, approval, Trust{ArtifactID: "unapproved"}); err == nil {
 		t.Fatal("queued runtime became trust")
 	}
 }
 func TestAssignmentRequiresExactTaskAndBoundedEnvelope(t *testing.T) {
 	data, snapshot, caller, approval, trust := assignmentFixture(t)
 	for _, bad := range []string{strings.Replace(string(data), `"revision":7`, `"revision":8`, 1), strings.Replace(string(data), `"revision":"7"`, `"revision":"epoch:7"`, 1), strings.Replace(string(data), `"approvedBrief":[]`, `"approvedBrief":[{}]`, 1), strings.Replace(string(data), `"goal":"Evaluate this saved Pack snapshot without saving."`, `"goal":"Save"`, 1), strings.Replace(string(data), `"taskVersion":1`, `"extra":true,"taskVersion":1`, 1), string(data) + " {}", strings.Repeat(" ", fixtureMetadataBytes+1)} {
-		if _, err := validateAssignment([]byte(bad), snapshot, caller, approval, trust); err == nil {
+		if _, err := validateTestAssignment([]byte(bad), snapshot, caller, approval, trust); err == nil {
 			t.Fatal("changed task/oversized envelope accepted")
 		}
 	}
@@ -115,12 +115,43 @@ func TestAssignmentVersionZeroStillRequiresPresentNumericVersion(t *testing.T) {
 	data = []byte(strings.ReplaceAll(strings.ReplaceAll(string(data), `"version":7`, `"version":0`), `"revision":7`, `"revision":0`))
 	data = []byte(strings.ReplaceAll(string(data), `"revision":"7"`, `"revision":"0"`))
 	approval.Input.Version = 0
-	if _, err := validateAssignment(data, snapshot, caller, approval, trust); err != nil {
+	if _, err := validateTestAssignment(data, snapshot, caller, approval, trust); err != nil {
 		t.Fatal(err)
 	}
 	for _, bad := range []string{strings.Replace(string(data), `"version":0,`, "", 1), strings.Replace(string(data), `"version":0`, `"version":null`, 1)} {
-		if _, err := validateAssignment([]byte(bad), snapshot, caller, approval, trust); err == nil {
+		if _, err := validateTestAssignment([]byte(bad), snapshot, caller, approval, trust); err == nil {
 			t.Fatal("absent/null saved version became zero")
 		}
+	}
+}
+
+func validateTestAssignment(data, snapshot []byte, caller Principal, approved AssignmentApproval, trust Trust) (evaluationAssignment, error) {
+	assignment, err := validateAssignmentMetadata(data, caller, approved, trust)
+	if err != nil {
+		return assignment, err
+	}
+	return assignment, validateAssignmentSnapshot(snapshot, assignment.Input)
+}
+func TestAssignmentRefusesCallerAndPinBeforeOpeningSnapshot(t *testing.T) {
+	data, _, caller, approval, trust := assignmentFixture(t)
+	directory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directory, "assignment.json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	// Deliberately absent: any attempt to read the snapshot changes the error.
+	for name, change := range map[string]func(*Principal, *Trust){"caller": func(p *Principal, _ *Trust) { p.ID = "foreign" }, "runtime": func(_ *Principal, p *Trust) { p.ArtifactID = "unapproved" }} {
+		t.Run(name, func(t *testing.T) {
+			actor, pin := caller, trust
+			change(&actor, &pin)
+			_, err := RunAssignment(context.Background(), nil, "missing-runtime", directory, actor, approval, pin)
+			if err == nil || !strings.Contains(err.Error(), "approved assignment scope/runtime") {
+				t.Fatal("read snapshot before refusing metadata", err)
+			}
+		})
+	}
+	stale := approval
+	stale.Fence.LeaseID = "stale"
+	if _, err := RunAssignment(context.Background(), nil, "missing-runtime", directory, caller, stale, trust); err == nil || !strings.Contains(err.Error(), "independently approved current pins") {
+		t.Fatal("read snapshot before refusing stale lease", err)
 	}
 }

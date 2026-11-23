@@ -57,7 +57,7 @@ var runtimeID = regexp.MustCompile(`^pack-readonly-v1-[a-f0-9]{64}$`)
 
 const maxSafeInteger int64 = 9007199254740991
 
-func validateAssignment(data, snapshot []byte, caller Principal, approved AssignmentApproval, trust Trust) (evaluationAssignment, error) {
+func validateAssignmentMetadata(data []byte, caller Principal, approved AssignmentApproval, trust Trust) (evaluationAssignment, error) {
 	var assignment evaluationAssignment
 	if len(data) > fixtureMetadataBytes || strictJSON(data, &assignment) != nil {
 		return assignment, errors.New("invalid bounded Pack assignment")
@@ -83,10 +83,6 @@ func validateAssignment(data, snapshot []byte, caller Principal, approved Assign
 	if assignment.ContractVersion != 1 || assignment.Action != "pack.evaluate_snapshot" || assignment.Fence != f || assignment.Input != i {
 		return assignment, errors.New("assignment differs from independently approved current pins")
 	}
-	sum := sha256.Sum256(snapshot)
-	if int64(len(snapshot)) != i.ByteSize || hex.EncodeToString(sum[:]) != i.ContentHash {
-		return assignment, errors.New("assignment snapshot bytes differ")
-	}
 	var task readTask
 	if strictJSON(assignment.Task, &task) != nil || task.Goal != "Evaluate this saved Pack snapshot without saving." || len(task.InputArtifacts) != 1 || task.InputArtifacts[0].Revision == nil || *task.InputArtifacts[0].Revision != i.Version {
 		return assignment, errors.New("assignment task version or goal differs")
@@ -97,6 +93,14 @@ func validateAssignment(data, snapshot []byte, caller Principal, approved Assign
 	}
 	return assignment, nil
 }
+func validateAssignmentSnapshot(snapshot []byte, input EvaluationInput) error {
+	sum := sha256.Sum256(snapshot)
+	if int64(len(snapshot)) != input.ByteSize || hex.EncodeToString(sum[:]) != input.ContentHash {
+		return errors.New("assignment snapshot bytes differ")
+	}
+	return nil
+}
+
 func assignmentScope(i EvaluationInput) readScope {
 	return readScope{Principal: Principal{Kind: "user", ID: i.UserID}, ProjectID: i.ProjectID, ResourceID: i.PackID, Revision: strconv.FormatInt(i.Version, 10), Snapshot: snapshotScope{ID: i.SnapshotID, ContentHash: i.ContentHash, File: "snapshot.json"}, Assets: []json.RawMessage{}}
 }
@@ -121,12 +125,15 @@ func RunAssignment(ctx context.Context, descriptor []byte, binary, input string,
 	if err != nil {
 		return nil, err
 	}
+	assignment, err := validateAssignmentMetadata(data, caller, approved, trust)
+	if err != nil {
+		return nil, err
+	}
 	snapshot, err := ReadRegularFile(filepath.Join(input, "snapshot.json"), fixtureSnapshotBytes)
 	if err != nil {
 		return nil, err
 	}
-	assignment, err := validateAssignment(data, snapshot, caller, approved, trust)
-	if err != nil {
+	if err := validateAssignmentSnapshot(snapshot, assignment.Input); err != nil {
 		return nil, err
 	}
 	directory, err := os.MkdirTemp("", "dtx-pack-assignment-")
