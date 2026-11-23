@@ -188,28 +188,15 @@ func (p *nativePayload) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &version); err != nil {
 		return err
 	}
+	if version.ContractVersion == 4 {
+		return unmarshalNativeOccupancy(data, p)
+	}
 	if version.ContractVersion != 3 {
 		return json.Unmarshal(data, (*payload)(p))
 	}
 	var wire map[string]any
 	if json.Unmarshal(data, &wire) != nil || !nativeExactFields(wire, []string{"contractVersion", "targetKind", "requestId", "documentId", "version", "snapshotId", "document", "configurationId", "operation", "limits", "fitLimits", "boardCaptures", "assets", "proofHash", "lease", "runtime"}) || !nativeSummaryCount(wire["version"], 9007199254740991) {
 		return errors.New("invalid native PCB assignment fields")
-	}
-	for key, fields := range map[string][]string{"document": {"hash", "size", "url"}, "lease": {"id", "expiresAt"}, "runtime": {"artifactId", "manifestUrl"}} {
-		object, ok := wire[key].(map[string]any)
-		if !ok || !nativeExactFields(object, fields) {
-			return errors.New("invalid native PCB assignment metadata")
-		}
-	}
-	assets, ok := wire["assets"].([]any)
-	if !ok {
-		return errors.New("invalid native PCB asset list")
-	}
-	for _, raw := range assets {
-		asset, ok := raw.(map[string]any)
-		if !ok || !nativeExactFields(asset, []string{"hash", "size", "url"}) {
-			return errors.New("invalid native PCB asset fields")
-		}
 	}
 	captures, ok := wire["boardCaptures"].([]any)
 	if !ok {
@@ -225,18 +212,40 @@ func (p *nativePayload) UnmarshalJSON(data []byte) error {
 			return errors.New("invalid native PCB provenance fields")
 		}
 	}
+	return decodeNativeAssignment(data, wire, p)
+}
+
+// Shared fixed transport metadata; each protocol checks its own exact domain fields.
+func decodeNativeAssignment(data []byte, wire map[string]any, p *nativePayload) error {
+	for key, fields := range map[string][]string{"document": {"hash", "size", "url"}, "lease": {"id", "expiresAt"}, "runtime": {"artifactId", "manifestUrl"}} {
+		object, ok := wire[key].(map[string]any)
+		if !ok || !nativeExactFields(object, fields) {
+			return errors.New("invalid native assignment metadata")
+		}
+	}
+	assets, ok := wire["assets"].([]any)
+	if !ok {
+		return errors.New("invalid native asset list")
+	}
+	for _, raw := range assets {
+		asset, ok := raw.(map[string]any)
+		if !ok || !nativeExactFields(asset, []string{"hash", "size", "url"}) {
+			return errors.New("invalid native asset fields")
+		}
+	}
+	type payload nativePayload
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode((*payload)(p)); err != nil {
 		return err
 	}
 	if err := decoder.Decode(new(any)); err != io.EOF {
-		return errors.New("invalid native PCB trailing JSON")
+		return errors.New("invalid native trailing JSON")
 	}
 	return nil
 }
 
-func (a *agent) rejectMalformedPCBJob(jobID string, payload []byte) {
+func (a *agent) rejectMalformedNativeJob(jobID string, payload []byte) {
 	var identity struct {
 		ContractVersion int `json:"contractVersion"`
 		Lease           struct {
@@ -246,7 +255,7 @@ func (a *agent) rejectMalformedPCBJob(jobID string, payload []byte) {
 	var version struct {
 		ContractVersion int `json:"contractVersion"`
 	}
-	if json.Unmarshal(payload, &version) != nil || version.ContractVersion != 3 {
+	if json.Unmarshal(payload, &version) != nil || (version.ContractVersion != 3 && version.ContractVersion != 4) {
 		return
 	}
 	if json.Unmarshal(payload, &identity) != nil {
@@ -262,5 +271,9 @@ func (a *agent) rejectMalformedPCBJob(jobID string, payload []byte) {
 		a.conn.CloseNow()
 		return
 	}
-	a.send(map[string]any{"type": "job.result", "jobId": jobID, "leaseId": identity.Lease.ID, "ok": false, "error": "Malformed PCB fit assignment"})
+	message := "Malformed PCB fit assignment"
+	if version.ContractVersion == 4 {
+		message = "Malformed assembly occupancy assignment"
+	}
+	a.send(map[string]any{"type": "job.result", "jobId": jobID, "leaseId": identity.Lease.ID, "ok": false, "error": message})
 }
