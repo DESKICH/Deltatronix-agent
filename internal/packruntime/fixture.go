@@ -92,12 +92,12 @@ func RegularFile(path string) (*os.File, error) {
 	if !info.Mode().IsRegular() {
 		return nil, errors.New("fixture input must be a regular file")
 	}
-	f, err := os.Open(path)
+	f, err := openRegularCandidate(path)
 	if err != nil {
 		return nil, err
 	}
 	opened, err := f.Stat()
-	if err != nil || !os.SameFile(info, opened) {
+	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) {
 		f.Close()
 		return nil, errors.New("fixture input changed while opening")
 	}

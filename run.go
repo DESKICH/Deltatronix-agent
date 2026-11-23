@@ -161,6 +161,9 @@ type agent struct {
 	nativeCap      bool
 	nativeReady    bool
 	jobs           map[string]context.CancelFunc
+
+	packRegistration *runnerRegistration
+	packRegistered   bool
 }
 
 // Retain tombstones across reconnects, scoped to the exact pairing identity.
@@ -221,6 +224,7 @@ func serve(parent context.Context, cfg Config, url string) (connected bool, err 
 	}
 	a := &agent{nativeReady: recoveryErr == nil, cfg: cfg, conn: conn, ctx: ctx, settings: loadLLMSettings(), jobs: map[string]context.CancelFunc{}, probeRequested: make(chan struct{}, 1)}
 	defer func() { cancel(); a.jobsWG.Wait() }()
+	a.registerPackRunner()
 	a.launchJob(a.reprobeLoop)
 
 	for {
@@ -253,6 +257,9 @@ func (a *agent) sendLocked(v any) {
 }
 
 func (a *agent) dispatch(data []byte) {
+	if a.onPackRunnerFrame(data) {
+		return
+	}
 	// Shape native frames route first, so the chat envelope checks below never
 	// refuse them.
 	var native struct {
