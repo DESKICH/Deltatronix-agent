@@ -8,12 +8,12 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/deltatronix/dtx-agent/internal/packruntime"
 )
@@ -40,11 +40,11 @@ func keys(t *testing.T, dir string) (string, string) {
 	}
 	return privatePath, publicPath
 }
-func signAndVerify(t *testing.T, binary, dir string) packruntime.Descriptor {
+func signAndVerify(t *testing.T, binary, dir string) (packruntime.Descriptor, string, string) {
 	t.Helper()
 	private, public := keys(t, dir)
 	var out bytes.Buffer
-	if err := run([]string{"sign", "--binary", binary, "--platform", "darwin-arm64", "--worker-host-commit", "b143bc8b21789d34ff5f18723449781af37a8128", "--key-id", "ephemeral-local-test", "--private-key", private}, &out); err != nil {
+	if err := run(context.Background(), []string{"sign", "--binary", binary, "--platform", runtime.GOOS + "-" + runtime.GOARCH, "--worker-host-commit", packruntime.PortableWorkerHostCommit, "--key-id", "ephemeral-local-test", "--private-key", private}, &out); err != nil {
 		t.Fatal(err)
 	}
 	var d packruntime.Descriptor
@@ -56,19 +56,19 @@ func signAndVerify(t *testing.T, binary, dir string) packruntime.Descriptor {
 		t.Fatal(err)
 	}
 	out.Reset()
-	verify := []string{"verify", "--binary", binary, "--descriptor", descriptor, "--platform", "darwin-arm64", "--key-id", "ephemeral-local-test", "--public-key", public, "--artifact-id", d.ArtifactID}
-	if err := run(verify, &out); err != nil {
+	verify := []string{"verify", "--binary", binary, "--descriptor", descriptor, "--platform", runtime.GOOS + "-" + runtime.GOARCH, "--key-id", "ephemeral-local-test", "--public-key", public, "--artifact-id", d.ArtifactID}
+	if err := run(context.Background(), verify, &out); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "companion trust/configuration unchanged") {
 		t.Fatal("verification overstated")
 	}
 	for _, args := range [][]string{verify[:len(verify)-2], append(append([]string{}, verify...), "--url=https://untrusted.test"), append(append([]string{}, verify...), "extra")} {
-		if err := run(args, &out); err == nil {
+		if err := run(context.Background(), args, &out); err == nil {
 			t.Fatal("unreviewed controls/selection accepted")
 		}
 	}
-	return d
+	return d, descriptor, public
 }
 func TestOfflineReleaseToolSignsAndVerifies(t *testing.T) {
 	dir := t.TempDir()
@@ -89,7 +89,7 @@ func TestOfflineReleaseToolRejectsNonRegularInputs(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, path := range []string{dir, link} {
-		if _, err := regular(path); err == nil {
+		if _, err := packruntime.RegularFile(path); err == nil {
 			t.Fatal("nonregular release input accepted")
 		}
 	}
@@ -102,22 +102,22 @@ func TestActualCompiledPackWorkerRelease(t *testing.T) {
 	if binary == "" || root == "" {
 		t.Skip("requires ephemeral actual UI #157 compiled Pack fixture")
 	}
-	d := signAndVerify(t, binary, t.TempDir())
+
+	d, descriptor, public := signAndVerify(t, binary, t.TempDir())
 	if d.Executable.Size < 1<<20 {
-		t.Fatal("expected actual Deno compiled runtime, not script fixture")
+		t.Fatal("expected actual compiled Deno worker")
 	}
 	snapshot := filepath.Join(root, "snapshot.json")
 	before, err := os.ReadFile(snapshot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	command := exec.CommandContext(ctx, binary, "--root="+root, "--principal=user:caller-a")
-	command.Env = []string{"PATH=" + os.Getenv("PATH")}
-	data, err := command.Output()
-	if err != nil {
-		t.Fatalf("actual Pack worker: %v", err)
+	ownedTemp := t.TempDir()
+	t.Setenv("TMPDIR", ownedTemp)
+	args := []string{"run-fixture", "--binary", binary, "--descriptor", descriptor, "--platform", runtime.GOOS + "-" + runtime.GOARCH, "--key-id", "ephemeral-local-test", "--public-key", public, "--artifact-id", d.ArtifactID, "--input-directory", root, "--principal", "user:caller-a"}
+	var out bytes.Buffer
+	if err := run(context.Background(), args, &out); err != nil {
+		t.Fatal(err)
 	}
 	var result struct {
 		Status      string `json:"status"`
@@ -126,17 +126,41 @@ func TestActualCompiledPackWorkerRelease(t *testing.T) {
 				Status string `json:"status"`
 			} `json:"receipts"`
 		} `json:"checkpoints"`
-		ReadinessReport json.RawMessage `json:"readinessReport"`
 	}
-	if err := json.Unmarshal(data, &result); err != nil {
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "waiting_for_input" || len(result.Checkpoints) != 1 || len(result.Checkpoints[0].Receipts) != 1 || result.Checkpoints[0].Receipts[0].Status != "readOnly" || len(result.ReadinessReport) != 0 {
-		t.Fatal("actual worker did not return only a read-only evaluation receipt")
+	if result.Status != "waiting_for_input" || len(result.Checkpoints) != 1 || len(result.Checkpoints[0].Receipts) != 1 || result.Checkpoints[0].Receipts[0].Status != "readOnly" {
+		t.Fatal("supervisor did not return actual read-only evidence")
 	}
 	after, err := os.ReadFile(snapshot)
 	if err != nil || !bytes.Equal(before, after) {
 		t.Fatal("saved fixture changed")
 	}
-	t.Logf("Actual compiled UI #157 binary signed/verified with ephemeral local key: %s (%d bytes); read-only receipt; input unchanged", d.ArtifactID, d.Executable.Size)
+	foreign := append([]string{}, args...)
+	foreign[len(foreign)-1] = "company:caller-a"
+	out.Reset()
+	if err := run(context.Background(), foreign, &out); err == nil || out.Len() != 0 {
+		t.Fatal("foreign caller obtained result")
+	}
+	if err := os.WriteFile(snapshot, append(append([]byte{}, before...), 0), 0600); err != nil {
+		t.Fatal(err)
+	}
+	defer os.WriteFile(snapshot, before, 0600)
+	if err := run(context.Background(), args, &out); err == nil || out.Len() != 0 {
+		t.Fatal("tampered snapshot obtained result")
+	}
+	if err := os.WriteFile(snapshot, before, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := run(cancelled, args, &out); !errors.Is(err, context.Canceled) || out.Len() != 0 {
+		t.Fatal("cancelled fixture admitted", err)
+	}
+	entries, err := os.ReadDir(ownedTemp)
+	if err != nil || len(entries) != 0 {
+		t.Fatal("private run directory not removed", err)
+	}
+	t.Logf("Actual portable UI29 worker passed signed one-shot host; %s (%d bytes); readOnly, foreign/tamper/cancel refusal, source unchanged and private run cleaned", d.ArtifactID, d.Executable.Size)
 }

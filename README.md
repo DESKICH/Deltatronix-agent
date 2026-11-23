@@ -443,16 +443,16 @@ go run ./cmd/pack-runtime-release verify \
   --artifact-id <independently-reviewed-artifact-id>
 ```
 
-This tool neither generates a production key nor installs trust, downloads or
-executes a runtime, changes agent configuration or advertises a Pack capability.
+The sign/verify commands do not generate a production key, install trust, download
+or execute a runtime, change agent configuration or advertise a Pack capability.
 Signing records the release operator's source/build assertion; verification proves
 that assertion's signature and exact bytes, not process confinement or backend
 resource authorization. Never take trust pins from a queued task or its descriptor.
 
-The production Pack signer/key distribution, a portable confined input root and
-Companion supervision/paired job transport remain required by backend #748.
-UI #157's compiled fixture currently embeds temporary read-permission paths; it is
-local proof rather than a portable release. The optional actual fixture test is:
+Production Pack signer/key distribution and Companion paired job transport remain
+required by backend #748. UI #157 now proves standalone relative job reads after
+build-tree removal; that local proof is not a production release or access grant.
+The optional actual fixture test uses that reviewed portable build:
 
 ```sh
 PACK_RUNTIME_FIXTURE_BINARY=/scratch/pack-readonly \
@@ -461,5 +461,47 @@ PACK_RUNTIME_FIXTURE_ROOT=/scratch/input \
 ```
 
 It generates a temporary test key, signs/verifies those exact compiled bytes, runs
-the asset-free evaluation and confirms its read-only receipt and unchanged input.
+them through the one-shot host below and checks read-only output, foreign caller/
+tamper/cancellation refusal, unchanged source input and private-directory cleanup.
 No runtime, key or fixture is committed by that test.
+
+### Supervised local Pack fixture (prerequisite)
+
+The explicit offline `run-fixture` command executes only a signed, independently
+selected portable worker built from reviewed UI commit
+`29d7f3cf0a57dd825e499760b6d36adb4842d249`, for the current macOS/Linux platform.
+It supports asset-free `pack.evaluate_snapshot` tasks with an empty approved brief.
+It is not connected to pairing, registration, backend authorization or job claims.
+
+```sh
+go run ./cmd/pack-runtime-release run-fixture \
+  --binary ./pack-readonly --descriptor ./descriptor.json --platform darwin-arm64 \
+  --key-id <reviewed-key-id> --public-key <reviewed-public-PEM> \
+  --artifact-id <independently-reviewed-artifact-id> \
+  --input-directory <trusted-local-fixture> --principal user:caller-a
+```
+
+The trusted input contains regular `scope.json`, `task.json` and `snapshot.json`
+files in the UI worker's existing format. The host checks exact caller, project,
+PACK/revision/action/snapshot binding and raw snapshot SHA-256; asset references,
+nonempty briefs, symlinks and additional controls refuse. Metadata is capped at
+64 KiB per file, snapshot at 16 MiB and executable at 128 MiB. It detaches input
+and the verified executable into a private temporary directory, with a fixed
+`job` child, fixed arguments, no stdin and an empty child environment.
+
+The child has a five-second outer deadline. Cancellation sends an interrupt,
+then kills after a 250 ms grace period and waits for child exit before cleanup.
+Stdout/result is capped at 64 KiB and stderr at 16 KiB using the existing Shape
+bounded writer. Only a single exact `waiting_for_input`/`readOnly` result for the
+bound revision is returned; stale/writable/extra evidence refuses. The human
+summary is not parsed as snapshot provenance. Errors return no successful result,
+and the private run directory is removed on both success and failure.
+
+The reviewed compiled Deno build supplies `--allow-read=job --no-prompt` and
+deny-net/env/run/write permissions; signature verification does not independently
+inspect those permissions or attest an OS sandbox. This is a local release
+fixture operation, without privileged execution or installed trust. No hard
+memory/process-tree/container isolation is claimed. Production signer/key
+ownership, scoped paired transport and structured runtime/attempt/lease receipts
+remain required before backend execution; caller-authored local scope is not a
+backend authorization grant.

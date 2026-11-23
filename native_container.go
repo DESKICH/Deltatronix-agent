@@ -13,8 +13,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
+
+	"github.com/deltatronix/dtx-agent/internal/boundedoutput"
 )
 
 // This image supplies glibc only; native jobs never invoke its Node engine.
@@ -38,35 +39,6 @@ func probeNativeContainer(ctx context.Context) error {
 
 func nativeContainerArgs(name, runtimeDir, inputDir, outputDir string) []string {
 	return []string{"create", "--name", name, "--label", "io.deltatronix.shape-native=true", "--label", "io.deltatronix.shape-owner=" + nativeContainerOwner(name), "--platform", "linux/arm64", "--network", "none", "--read-only", "--user", "65534:65534", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--memory", "1073741824", "--memory-swap", "1073741824", "--cpus", "1", "--pids-limit", "64", "--ulimit", "core=0:0", "--ulimit", "fsize=8388608:8388608", "--tmpfs", "/tmp:rw,noexec,nosuid,size=16777216", "--mount", "type=bind,src=" + runtimeDir + ",dst=/runtime,readonly", "--mount", "type=bind,src=" + inputDir + ",dst=/input,readonly", "--mount", "type=bind,src=" + outputDir + ",dst=/output", "--log-driver", "none", "--interactive", "--entrypoint", "/runtime/shape-native", nativeImage, "/input/job.json"}
-}
-
-type boundedNativeBuffer struct {
-	mu       sync.Mutex
-	b        bytes.Buffer
-	max      int
-	overflow context.CancelFunc
-	observe  func([]byte) error
-}
-
-func (b *boundedNativeBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.b.Len()+len(p) > b.max {
-		b.overflow()
-		return 0, errors.New("native output limit exceeded")
-	}
-	if b.observe != nil {
-		if err := b.observe(p); err != nil {
-			b.overflow()
-			return 0, err
-		}
-	}
-	return b.b.Write(p)
-}
-func (b *boundedNativeBuffer) Bytes() []byte {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return append([]byte(nil), b.b.Bytes()...)
 }
 
 // Container removal uses a separate context: cancellation must not prevent kill.
@@ -123,8 +95,8 @@ func runNativeContainer(ctx context.Context, name, runtimeDir, inputDir, outputD
 	defer cancel()
 	running := make(chan struct{}, 1)
 	monitor := &nativeOutputMonitor{contractVersion: contractVersion, requestID: requestID, running: running}
-	stdoutBuffer := &boundedNativeBuffer{max: 12 << 20, overflow: cancel, observe: monitor.write}
-	stderrBuffer := &boundedNativeBuffer{max: 64 << 10, overflow: cancel}
+	stdoutBuffer := &boundedoutput.Buffer{Max: 12 << 20, Overflow: cancel, Observe: monitor.write}
+	stderrBuffer := &boundedoutput.Buffer{Max: 64 << 10, Overflow: cancel}
 	cmd := exec.Command("docker", "start", "--attach", "--interactive", name)
 	stdin, pipeErr := cmd.StdinPipe()
 	if pipeErr != nil {
@@ -421,8 +393,8 @@ func publishNativeControls(ctx context.Context, name, inputDir, requestID string
 	readCtx, readCancel := context.WithTimeout(ctx, 2*time.Second)
 	defer readCancel()
 	cmd := exec.CommandContext(readCtx, "docker", "exec", name, "/bin/cat", "/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.swap.max", "/sys/fs/cgroup/pids.max", "/sys/fs/cgroup/cpu.max")
-	out := &boundedNativeBuffer{max: 4096, overflow: readCancel}
-	stderr := &boundedNativeBuffer{max: 4096, overflow: readCancel}
+	out := &boundedoutput.Buffer{Max: 4096, Overflow: readCancel}
+	stderr := &boundedoutput.Buffer{Max: 4096, Overflow: readCancel}
 	cmd.Stdout = out
 	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {
