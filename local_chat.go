@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +14,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -279,57 +282,176 @@ func validateChatPayload(p chatPayload, contextTokens int) error {
 	return nil
 }
 
-func callLocalChat(ctx context.Context, s LLMSettings, p chatPayload) (json.RawMessage, error) {
+func callLocalChat(ctx context.Context, s LLMSettings, p chatPayload) (chatCompletion, error) {
+	var result chatCompletion
 	data, err := json.Marshal(map[string]any{"model": p.Model, "messages": p.Messages, "tools": p.Tools, "stream": false, "max_tokens": p.MaxTokens})
 	if err != nil || len(data) > maxChatBytes {
-		return nil, errors.New("CHAT_INVALID_REQUEST")
+		return result, errors.New("CHAT_INVALID_REQUEST")
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(s.BackendURL, "/")+"/chat/completions", bytes.NewReader(data))
 	if err != nil {
-		return nil, errors.New("CHAT_BACKEND_UNAVAILABLE")
+		return result, errors.New("CHAT_BACKEND_UNAVAILABLE")
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := localChatHTTP.Do(req)
 	if err != nil {
-		return nil, errors.New("CHAT_BACKEND_UNAVAILABLE: check the local server or cancellation/expiry")
+		return result, errors.New("CHAT_BACKEND_UNAVAILABLE: check the local server or cancellation/expiry")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("CHAT_BACKEND_STATUS: local server returned %d", resp.StatusCode)
+		return result, fmt.Errorf("CHAT_BACKEND_STATUS: local server returned %d", resp.StatusCode)
 	}
 	body, err := readChatBytes(resp.Body, maxChatBytes)
 	if err != nil {
-		return nil, err
+		return result, err
 	}
-	var result chatCompletion
 	if checkChatJSON(body) != nil || json.Unmarshal(body, &result) != nil || result.Model != p.Model || len(result.Choices) != 1 || result.Choices[0].Index != 0 {
-		return nil, errors.New("CHAT_INVALID_RESPONSE: expected one completion from the selected model")
+		return result, errors.New("CHAT_INVALID_RESPONSE: expected one completion from the selected model")
 	}
 	choice := result.Choices[0]
 	if choice.FinishReason == "length" {
-		return nil, errors.New("CHAT_TRUNCATED: the local model hit maxTokens before finishing")
+		return result, errors.New("CHAT_TRUNCATED: the local model hit maxTokens before finishing")
 	}
 	if choice.Message.Role != "assistant" || !slices.Contains([]string{"stop", "tool_calls"}, choice.FinishReason) || len(choice.Message.ToolCalls) > 8 || len(choice.Message.Content) > 16<<10 {
-		return nil, errors.New("CHAT_INVALID_RESPONSE")
+		return result, errors.New("CHAT_INVALID_RESPONSE")
 	}
 	var text string
 	if choice.Message.ToolCallID != "" || (string(choice.Message.Content) != "null" && json.Unmarshal(choice.Message.Content, &text) != nil) ||
 		(len(choice.Message.ToolCalls) == 0 && string(choice.Message.Content) == "null") ||
 		((choice.FinishReason == "tool_calls") != (len(choice.Message.ToolCalls) > 0)) || result.Usage.Prompt < 0 || result.Usage.Completion < 0 || result.Usage.Completion > p.MaxTokens || result.Usage.Total != result.Usage.Prompt+result.Usage.Completion {
-		return nil, errors.New("CHAT_INVALID_RESPONSE: invalid assistant completion or usage")
+		return result, errors.New("CHAT_INVALID_RESPONSE: invalid assistant completion or usage")
 	}
-	seen := map[string]bool{}
-	for _, call := range choice.Message.ToolCalls {
-		if seen[call.ID] || !validChatCall(call, p.Tools) {
-			return nil, errors.New("CHAT_INVALID_TOOL_CALL: expected an advertised function with JSON object arguments")
+	return result, nil
+}
+
+// invalidRoundRetries bounds how often a round with no valid call is answered
+// with its tool errors and asked again inside one job.
+const invalidRoundRetries = 2
+
+// runLocalChat answers one chat job. A call the local model gets wrong never
+// fails the job on its own: the model sees why as that call's tool error. A
+// round with valid calls returns them, and its refused calls rejoin the round
+// when a later job of the turn replays it; a round with none is answered at
+// once and asked again.
+func runLocalChat(ctx context.Context, s LLMSettings, p chatPayload) (json.RawMessage, error) {
+	p.Messages = withRefusedCalls(p.Messages)
+	for retry := 0; ; retry++ {
+		result, err := callLocalChat(ctx, s, p)
+		if err != nil {
+			return nil, err
 		}
-		seen[call.ID] = true
+		message := &result.Choices[0].Message
+		var valid, refused []chatToolCall
+		var refusals []chatMessage
+		seen := map[string]bool{}
+		for _, call := range message.ToolCalls {
+			reason := callRefusal(call, p.Tools)
+			if reason == "" && seen[call.ID] {
+				reason = "its id repeats another call of the same round"
+			}
+			if reason == "" {
+				seen[call.ID] = true
+				valid = append(valid, call)
+				continue
+			}
+			stand := refusedStandIn(call)
+			refused = append(refused, stand)
+			refusals = append(refusals, toolText(stand.ID, "Not run: "+reason+". Call again with an offered tool and a JSON object of arguments."))
+		}
+		switch {
+		case len(refused) == 0:
+		case len(valid) > 0:
+			message.ToolCalls = valid
+			keepRefusedCalls(valid, refused, refusals)
+		case retry < invalidRoundRetries:
+			p.Messages = append(slices.Clip(p.Messages), chatMessage{Role: "assistant", Content: message.Content, ToolCalls: refused})
+			p.Messages = append(p.Messages, refusals...)
+			continue
+		default:
+			return nil, fmt.Errorf("CHAT_INVALID_TOOL_CALL: the local model's calls were refused %d times in a row", retry+1)
+		}
+		normalized, err := json.Marshal(result)
+		if err != nil || len(normalized) > 60<<10 {
+			return nil, errors.New("CHAT_RESPONSE_LIMIT: normalized completion exceeded 60 KiB")
+		}
+		return normalized, nil
 	}
-	normalized, err := json.Marshal(result)
-	if err != nil || len(normalized) > 60<<10 {
-		return nil, errors.New("CHAT_RESPONSE_LIMIT: normalized completion exceeded 60 KiB")
+}
+
+func toolText(callID, text string) chatMessage {
+	content, _ := json.Marshal(text)
+	return chatMessage{Role: "tool", Content: content, ToolCallID: callID}
+}
+
+// refusedStandIn is a refused call as the model is shown it again: a fresh id
+// and empty arguments, so the replayed round is valid for the local server.
+func refusedStandIn(call chatToolCall) chatToolCall {
+	id := make([]byte, 8)
+	_, _ = rand.Read(id)
+	stand := chatToolCall{ID: "refused-" + hex.EncodeToString(id), Type: "function"}
+	stand.Function.Name = "invalid_tool_name"
+	if validToolName(call.Function.Name) {
+		stand.Function.Name = call.Function.Name
 	}
-	return normalized, nil
+	stand.Function.Arguments = "{}"
+	return stand
+}
+
+// refusedRounds keeps a mixed round's refused calls, under each of its valid
+// call ids, because the browser runs and replays only the valid calls. Chat
+// jobs of one turn never move device, so the next job of the turn lands here.
+// ponytail: in-memory and capped; a restart drops the notes, and the model
+// then simply does not see the old refusal again.
+var refusedRounds = struct {
+	sync.Mutex
+	byCall map[string]refusedRound
+}{byCall: map[string]refusedRound{}}
+
+type refusedRound struct {
+	calls     []chatToolCall
+	refusals  []chatMessage
+	expiresAt time.Time
+}
+
+const refusedRoundsCap = 1024
+
+func keepRefusedCalls(valid, refused []chatToolCall, refusals []chatMessage) {
+	refusedRounds.Lock()
+	defer refusedRounds.Unlock()
+	now := time.Now()
+	for id, round := range refusedRounds.byCall {
+		if now.After(round.expiresAt) {
+			delete(refusedRounds.byCall, id)
+		}
+	}
+	round := refusedRound{calls: refused, refusals: refusals, expiresAt: now.Add(time.Hour)}
+	for _, call := range valid {
+		if len(refusedRounds.byCall) < refusedRoundsCap {
+			refusedRounds.byCall[call.ID] = round
+		}
+	}
+}
+
+// withRefusedCalls puts each kept refusal back into the round it came from,
+// with its tool error right after the round.
+func withRefusedCalls(messages []chatMessage) []chatMessage {
+	refusedRounds.Lock()
+	defer refusedRounds.Unlock()
+	out := make([]chatMessage, 0, len(messages))
+	for _, m := range messages {
+		out = append(out, m)
+		if m.Role != "assistant" {
+			continue
+		}
+		for _, call := range m.ToolCalls {
+			if round, ok := refusedRounds.byCall[call.ID]; ok {
+				out[len(out)-1].ToolCalls = append(slices.Clip(m.ToolCalls), round.calls...)
+				out = append(out, round.refusals...)
+				break
+			}
+		}
+	}
+	return out
 }
 
 // chatProbeMaxTokens leaves room for a thinking model (qwen3) to reason
@@ -351,12 +473,11 @@ func probeLocalChat(ctx context.Context, s LLMSettings, installed []string) erro
 	if err := validateChatPayload(p, s.ChatContextTokens); err != nil {
 		return err
 	}
-	data, err := callLocalChat(probeCtx, s, p)
+	result, err := callLocalChat(probeCtx, s, p)
 	if err != nil {
 		return err
 	}
-	var result chatCompletion
-	if json.Unmarshal(data, &result) != nil || len(result.Choices[0].Message.ToolCalls) != 1 {
+	if len(result.Choices[0].Message.ToolCalls) != 1 {
 		return errors.New("the model answered without exactly one tool call")
 	}
 	call := result.Choices[0].Message.ToolCalls[0]
@@ -384,12 +505,32 @@ func validToolName(name string) bool {
 // A call must name an advertised tool and carry a JSON object of at most 8 KiB.
 // Argument types are the browser runtime's to check.
 func validChatCall(call chatToolCall, tools []chatTool) bool {
-	if call.Type != "function" || !validChatName(call.ID, 128) || len(call.Function.Arguments) > 8192 {
-		return false
+	return callRefusal(call, tools) == ""
+}
+
+// callRefusal says why a call cannot run, in words the model can act on; empty
+// when it can.
+func callRefusal(call chatToolCall, tools []chatTool) string {
+	if call.Type != "function" || !validChatName(call.ID, 128) {
+		return "the call has no function type or no usable id"
+	}
+	if len(call.Function.Arguments) > 8192 {
+		return "its arguments are larger than 8 KiB"
 	}
 	var args map[string]json.RawMessage
 	if decodeChatJSON([]byte(call.Function.Arguments), &args) != nil || args == nil {
-		return false
+		return "its arguments are not a JSON object"
 	}
-	return slices.ContainsFunc(tools, func(tool chatTool) bool { return tool.Function.Name == call.Function.Name })
+	if !slices.ContainsFunc(tools, func(tool chatTool) bool { return tool.Function.Name == call.Function.Name }) {
+		names := make([]string, len(tools))
+		for i, tool := range tools {
+			names[i] = tool.Function.Name
+		}
+		name := call.Function.Name
+		if len(name) > 64 {
+			name = name[:64]
+		}
+		return fmt.Sprintf("%q is not an offered tool (offered: %s)", name, strings.Join(names, ", "))
+	}
+	return ""
 }
