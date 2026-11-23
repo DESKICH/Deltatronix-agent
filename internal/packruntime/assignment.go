@@ -37,7 +37,7 @@ type AssignmentApproval struct {
 	Fence EvaluationFence `json:"fence"`
 	Input EvaluationInput `json:"input"`
 }
-type evaluationAssignment struct {
+type EvaluationAssignment struct {
 	ContractVersion int             `json:"contractVersion"`
 	Action          string          `json:"action"`
 	Fence           EvaluationFence `json:"fence"`
@@ -57,8 +57,10 @@ var runtimeID = regexp.MustCompile(`^pack-readonly-v1-[a-f0-9]{64}$`)
 
 const maxSafeInteger int64 = 9007199254740991
 
-func validateAssignmentMetadata(data []byte, caller Principal, approved AssignmentApproval, trust Trust) (evaluationAssignment, error) {
-	var assignment evaluationAssignment
+// ValidateAssignmentMetadata binds metadata before any snapshot read. It checks
+// supplied current pins; it does not establish their authority or inspect bytes.
+func ValidateAssignmentMetadata(data []byte, caller Principal, approved AssignmentApproval, trust Trust) (EvaluationAssignment, error) {
+	var assignment EvaluationAssignment
 	if len(data) > fixtureMetadataBytes || strictJSON(data, &assignment) != nil {
 		return assignment, errors.New("invalid bounded Pack assignment")
 	}
@@ -125,7 +127,7 @@ func RunAssignment(ctx context.Context, descriptor []byte, binary, input string,
 	if err != nil {
 		return nil, err
 	}
-	assignment, err := validateAssignmentMetadata(data, caller, approved, trust)
+	assignment, err := ValidateAssignmentMetadata(data, caller, approved, trust)
 	if err != nil {
 		return nil, err
 	}

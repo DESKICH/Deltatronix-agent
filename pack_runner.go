@@ -40,7 +40,15 @@ type runnerRuntime struct {
 	Version string `json:"version"`
 }
 
-func loadPackRegistration(cfg Config) (*runnerRegistration, error) {
+type packRunnerSelection struct {
+	registration runnerRegistration
+	binary       string
+	descriptor   []byte
+	verified     packruntime.Descriptor
+	trust        packruntime.Trust
+}
+
+func loadPackRunner(cfg Config) (*packRunnerSelection, error) {
 	dir, err := agentConfigDir()
 	if err != nil {
 		return nil, err
@@ -89,22 +97,24 @@ func loadPackRegistration(cfg Config) (*runnerRegistration, error) {
 		return nil, err
 	}
 	defer binary.Close()
-	verified, err := packruntime.Verify(descriptor, binary, packruntime.Trust{KeyID: approved.KeyID, PublicKeyPEM: string(key), ArtifactID: approved.ArtifactID, Platform: runtime.GOOS + "-" + runtime.GOARCH})
+	trust := packruntime.Trust{KeyID: approved.KeyID, PublicKeyPEM: string(key), ArtifactID: approved.ArtifactID, Platform: runtime.GOOS + "-" + runtime.GOARCH}
+	verified, err := packruntime.Verify(descriptor, binary, trust)
 	if err != nil {
 		return nil, err
 	}
-	return &runnerRegistration{1, "companion", approved.ProjectIDs, []string{"pack"}, map[string]string{"@deltatronix/pack-core": verified.PackCoreVersion}, runnerRuntime{"deno", verified.DenoVersion}}, nil
+	return &packRunnerSelection{registration: runnerRegistration{1, "companion", approved.ProjectIDs, []string{"pack"}, map[string]string{"@deltatronix/pack-core": verified.PackCoreVersion}, runnerRuntime{"deno", verified.DenoVersion}}, binary: approved.Binary, descriptor: descriptor, verified: verified, trust: trust}, nil
 }
 
 func (a *agent) registerPackRunner() {
-	registration, err := loadPackRegistration(a.cfg)
+	selection, err := loadPackRunner(a.cfg)
 	if err != nil {
 		log.Printf("Pack runner registration disabled: local approval or runtime verification failed")
 		return
 	}
-	if registration == nil {
+	if selection == nil {
 		return
 	}
+	registration := &selection.registration
 	a.mu.Lock()
 	a.packRegistration = registration
 	a.packRegistered = false
