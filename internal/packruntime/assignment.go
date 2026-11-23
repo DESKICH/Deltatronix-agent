@@ -95,7 +95,9 @@ func ValidateAssignmentMetadata(data []byte, caller Principal, approved Assignme
 	}
 	return assignment, nil
 }
-func validateAssignmentSnapshot(snapshot []byte, input EvaluationInput) error {
+
+// ValidateSnapshotBytes proves exact raw bytes independently of transport headers.
+func ValidateSnapshotBytes(snapshot []byte, input EvaluationInput) error {
 	sum := sha256.Sum256(snapshot)
 	if int64(len(snapshot)) != input.ByteSize || hex.EncodeToString(sum[:]) != input.ContentHash {
 		return errors.New("assignment snapshot bytes differ")
@@ -135,7 +137,7 @@ func RunAssignment(ctx context.Context, descriptor []byte, binary, input string,
 	if err != nil {
 		return nil, err
 	}
-	if err := validateAssignmentSnapshot(snapshot, assignment.Input); err != nil {
+	if err := ValidateSnapshotBytes(snapshot, assignment.Input); err != nil {
 		return nil, err
 	}
 	directory, err := os.MkdirTemp("", "dtx-pack-assignment-")
