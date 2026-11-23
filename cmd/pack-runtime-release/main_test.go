@@ -5,7 +5,9 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -14,6 +16,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/deltatronix/dtx-agent/internal/packruntime"
 )
@@ -163,4 +166,100 @@ func TestActualCompiledPackWorkerRelease(t *testing.T) {
 		t.Fatal("private run directory not removed", err)
 	}
 	t.Logf("Actual portable UI29 worker passed signed one-shot host; %s (%d bytes); readOnly, foreign/tamper/cancel refusal, source unchanged and private run cleaned", d.ArtifactID, d.Executable.Size)
+}
+
+func TestActualCompiledPackAssignment(t *testing.T) {
+	binary, root := os.Getenv("PACK_RUNTIME_FIXTURE_BINARY"), os.Getenv("PACK_RUNTIME_FIXTURE_ROOT")
+	if binary == "" || root == "" {
+		t.Skip("requires ephemeral actual UI #157 compiled Pack fixture")
+	}
+	d, descriptor, public := signAndVerify(t, binary, t.TempDir())
+	if d.Executable.Size < 1<<20 {
+		t.Fatal("expected actual compiled Deno worker")
+	}
+	snapshot, err := os.ReadFile(filepath.Join(root, "snapshot.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(snapshot)
+	approval := packruntime.AssignmentApproval{Fence: packruntime.EvaluationFence{JobID: "job-a", Attempt: 1, LeaseID: "lease-a", AgentID: "agent-a", RuntimeID: d.ArtifactID, ExpiresAt: time.Now().Add(time.Minute).UnixMilli()}, Input: packruntime.EvaluationInput{UserID: "caller-a", ProjectID: "project-a", PackID: "pack-a", Version: 7, SnapshotID: "snapshot-a", ContentHash: hex.EncodeToString(sum[:]), ByteSize: int64(len(snapshot))}}
+	task := map[string]any{"taskVersion": 1, "domainId": "pack", "resource": map[string]any{"kind": "PACK", "id": "pack-a", "revision": "7"}, "goal": "Evaluate this saved Pack snapshot without saving.", "approvedBrief": []any{}, "constraints": map[string]any{"action": "pack.evaluate_snapshot", "projectId": "project-a"}, "inputArtifacts": []any{map[string]any{"kind": "pack_snapshot", "id": "snapshot-a", "revision": 7, "contentHash": approval.Input.ContentHash}}}
+	assignment := map[string]any{"contractVersion": 1, "action": "pack.evaluate_snapshot", "fence": approval.Fence, "input": approval.Input, "task": task}
+	input := t.TempDir()
+	approvedDir := t.TempDir()
+	approvalPath := filepath.Join(approvedDir, "approval.json")
+	write := func(path string, v any) {
+		t.Helper()
+		b, e := json.Marshal(v)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if e = os.WriteFile(path, b, 0600); e != nil {
+			t.Fatal(e)
+		}
+	}
+	write(approvalPath, approval)
+	write(filepath.Join(input, "assignment.json"), assignment)
+	if err := os.WriteFile(filepath.Join(input, "snapshot.json"), snapshot, 0600); err != nil {
+		t.Fatal(err)
+	}
+	owned := t.TempDir()
+	t.Setenv("TMPDIR", owned)
+	args := []string{"run-assignment", "--binary", binary, "--descriptor", descriptor, "--platform", runtime.GOOS + "-" + runtime.GOARCH, "--key-id", "ephemeral-local-test", "--public-key", public, "--artifact-id", d.ArtifactID, "--input-directory", input, "--principal", "user:caller-a", "--approval", approvalPath}
+	var out bytes.Buffer
+	if err := run(context.Background(), args, &out); err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		ContractVersion int                         `json:"contractVersion"`
+		Fence           packruntime.EvaluationFence `json:"fence"`
+		Input           packruntime.EvaluationInput `json:"input"`
+		Result          struct {
+			Status      string `json:"status"`
+			Revision    string `json:"revision"`
+			Checkpoints []struct {
+				Receipts []struct {
+					Status string `json:"status"`
+				} `json:"receipts"`
+			} `json:"checkpoints"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.ContractVersion != 1 || result.Fence != approval.Fence || result.Input != approval.Input || result.Result.Status != "waiting_for_input" || result.Result.Revision != "7" || len(result.Result.Checkpoints) != 1 || len(result.Result.Checkpoints[0].Receipts) != 1 || result.Result.Checkpoints[0].Receipts[0].Status != "readOnly" {
+		t.Fatal("assignment result lost exact fence/input/read-only receipt")
+	}
+	for name, change := range map[string]func(){"lease": func() { changed := approval.Fence; changed.LeaseID = "stale"; assignment["fence"] = changed }, "attempt": func() { changed := approval.Fence; changed.Attempt++; assignment["fence"] = changed }, "runtime": func() {
+		changed := approval.Fence
+		changed.RuntimeID = "pack-readonly-v1-" + strings.Repeat("b", 64)
+		assignment["fence"] = changed
+	}, "principal": func() { changed := approval.Input; changed.UserID = "foreign"; assignment["input"] = changed }, "snapshot": func() {
+		if err := os.WriteFile(filepath.Join(input, "snapshot.json"), append(append([]byte{}, snapshot...), 0), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}} {
+		t.Run(name, func(t *testing.T) {
+			assignment["fence"] = approval.Fence
+			assignment["input"] = approval.Input
+			change()
+			write(filepath.Join(input, "assignment.json"), assignment)
+			out.Reset()
+			if err := run(context.Background(), args, &out); err == nil || out.Len() != 0 {
+				t.Fatal("changed assignment obtained result")
+			}
+			if err := os.WriteFile(filepath.Join(input, "snapshot.json"), snapshot, 0600); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	after, err := os.ReadFile(filepath.Join(root, "snapshot.json"))
+	if err != nil || !bytes.Equal(snapshot, after) {
+		t.Fatal("saved source changed", err)
+	}
+	entries, err := os.ReadDir(owned)
+	if err != nil || len(entries) != 0 {
+		t.Fatal("assignment private runs not removed", err)
+	}
+	t.Logf("Actual signed portable worker consumed Backend #1069 v1 assignment, echoed exact pins, readOnly; changed lease/attempt/runtime/principal/snapshot refused; saved source unchanged and private runs cleaned")
 }

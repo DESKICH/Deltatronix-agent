@@ -557,3 +557,49 @@ attestation, executable readiness or saved completion. It adds no task claims or
 Pack job handler and leaves Shape/chat/vision capability frames unchanged. Stop
 the daemon before changing/removing approval or release files, then restart;
 configuration is read at connection time, not watched during a connection.
+
+### Offline pinned assignment/result boundary (prerequisite)
+
+`pack-runtime-release run-assignment` consumes Backend #1069's private v1
+assignment JSON and exact asset-free snapshot bytes through the same signed
+runtime verifier and supervised worker used by `run-fixture`. It is not wired
+to the paired daemon, queue, claim or completion API.
+
+```sh
+go run ./cmd/pack-runtime-release run-assignment \
+  --binary <reviewed-portable-worker> --descriptor <signed-descriptor> \
+  --platform <current-platform> --key-id <approved-key-id> \
+  --public-key <independently-approved-public-key> --artifact-id <approved-id> \
+  --input-directory <local-assignment-and-snapshot-directory> \
+  --principal user:caller-a --approval <independent-current-approval.json>
+```
+
+The input directory contains `assignment.json` and `snapshot.json`. The separate
+operator-approved JSON contains exactly `{ "fence": ..., "input": ... }` matching
+the current assignment. Approve that file independently; copying queued metadata
+into it does not establish authority. There is no default approval, production
+signer or configured runtime. The fence pins job/attempt/lease/agent/runtime ID and
+expiry; input pins user/project/Pack/saved numeric version/snapshot/hash/byte size.
+The runtime ID must equal the independently selected signed descriptor artifact.
+The caller must be the exact user; company tasks, assets, skills and saves remain
+unsupported. Version zero is valid, but the numeric version must be explicit.
+
+Before execution, the bounded task is checked against those pins, including its
+numeric artifact revision and decimal-string resource revision. The exact saved
+bytes must match both hash and length. The deadline is the earlier of lease
+expiry and the existing five-second supervisor wall limit. The existing Deno
+worker also terminates its isolate at three seconds. Input metadata/snapshot and
+result limits remain 64 KiB/16 MiB/64 KiB; the complete outer result shares the
+64 KiB result limit. Empty environment, relative job read permission, bounded
+stdout/stderr, process reaping, detached inputs and cleanup reuse the existing
+supervisor. This adds temporary detached input copies, not an OS memory limit or
+sandbox attestation; hard process memory/container policy is still outstanding.
+
+Success echoes exact fence/input plus the unchanged ai-chat v1
+`waiting_for_input` result with one `readOnly` receipt. It claims no save or final
+readiness. Local approval is not live authorization, a durable lease check or a
+completion CAS. A future authenticated transport must independently revalidate
+actor/resource access, current snapshot/attempt/expiry, release approval and
+atomic settlement. No production job dispatch or registration behavior changes.
+Historical offline fixtures without an optional artifact revision remain valid;
+when supplied, the numeric artifact revision must match their scope.

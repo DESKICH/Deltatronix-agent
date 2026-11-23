@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -59,6 +60,7 @@ type readTask struct {
 	} `json:"constraints"`
 	InputArtifacts []struct {
 		Kind        string `json:"kind"`
+		Revision    *int64 `json:"revision,omitempty"`
 		ID          string `json:"id"`
 		ContentHash string `json:"contentHash"`
 	} `json:"inputArtifacts"`
@@ -148,14 +150,24 @@ func loadFixture(input string, caller Principal) (readScope, map[string][]byte, 
 	if hex.EncodeToString(h[:]) != scope.Snapshot.ContentHash {
 		return scope, nil, errors.New("fixture snapshot hash mismatch")
 	}
+	if err := validateReadTask(task, scope); err != nil {
+		return scope, nil, err
+	}
+	return scope, files, nil
+}
+
+func validateReadTask(task readTask, scope readScope) error {
 	if task.TaskVersion != 1 || task.DomainID != "pack" || task.Resource.Kind != "PACK" || task.Resource.ID != scope.ResourceID || task.Resource.Revision != scope.Revision || len(strings.TrimSpace(task.Goal)) == 0 || len(task.Goal) > 16384 || task.ApprovedBrief == nil || len(task.ApprovedBrief) != 0 || task.Constraints.Action != "pack.evaluate_snapshot" || task.Constraints.ProjectID != scope.ProjectID || len(task.InputArtifacts) != 1 {
-		return scope, nil, errors.New("fixture task does not match read-only saved scope")
+		return errors.New("fixture task does not match read-only saved scope")
 	}
 	artifact := task.InputArtifacts[0]
 	if artifact.Kind != "pack_snapshot" || artifact.ID != scope.Snapshot.ID || artifact.ContentHash != scope.Snapshot.ContentHash {
-		return scope, nil, errors.New("fixture task snapshot mismatch")
+		return errors.New("fixture task snapshot mismatch")
 	}
-	return scope, files, nil
+	if revision := task.InputArtifacts[0].Revision; revision != nil && strconv.FormatInt(*revision, 10) != scope.Revision {
+		return errors.New("task artifact revision differs from scope")
+	}
+	return nil
 }
 
 // RunFixture is an offline operator tool, not a pairing/authorization or sandbox attestation.
