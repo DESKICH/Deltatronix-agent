@@ -270,12 +270,26 @@ inference, so it runs once per connection and again only after the selected
 model leaves and returns to the `/models` listing; the 60-second recheck only
 lists models. The probe allows 1,024 output tokens so a thinking model (for example
 `qwen3:8b`) can reason before its call. A failed probe leaves chat unavailable
-until the next connection and logs why.
-With `llm.chat`, the capabilities frame names the model and its context cap:
+until the next connection and logs why. A chat job that arrives before this
+connection's probe has answered (the backend restores `llm.chat` on reconnect)
+fails with `CHAT_PROBE_PENDING`, so the editor asks the user to try again
+instead of reporting a lost model.
+
+Every capabilities frame names the companion's `version`. With `llm.chat`, it
+also names the model, its context cap and the request bytes the model's
+tokenizer packs into one token, measured on the probe (1 to 3; 1 when the
+server reports no usage):
 
 ```json
-{"type":"capabilities","capabilities":["llm.chat"],"chat":{"model":"gemma4:latest","contextTokens":131072}}
+{"type":"capabilities","version":"0.1.4","capabilities":["llm.chat"],"chat":{"model":"gemma4:latest","contextTokens":131072,"bytesPerToken":3}}
 ```
+
+On Ollama (detected by `GET /api/version` next to `/v1`), chat runs through the
+native `/api/chat` endpoint with `options.num_ctx` set to `chat_context_tokens`,
+because Ollama's `/v1` endpoint takes no context size and would run the model at
+the server default, silently cutting long prompts. Other servers (LM Studio and
+the rest) use `/v1/chat/completions`; set the model's context in the server to
+at least `chat_context_tokens`.
 
 The only ingress is the existing outbound bearer-paired `/compute/ws`
 connection. No inbound bridge or local tool/shell execution exists. The model
@@ -317,8 +331,8 @@ with `CHAT_LOCAL_TIMEOUT`; an assignment that arrives already expired fails with
 | Explicit context / output cap | 1 to 1,048,576 / 1 to 8,192 tokens |
 | Probe / inference timeout | 180 seconds each; earlier expiry or cancellation wins |
 
-Context admission conservatively counts serialized input bytes as tokens, plus
-1,024 tokens of framing allowance and the requested output cap. A request that
+Context admission counts serialized input bytes at the probe's measured bytes
+per token, plus 1,024 tokens of framing allowance and the requested output cap. A request that
 does not fit is refused rather than truncated. Results use the existing
 `job.result` envelope with `ok`, and either a stable error code or normalized
 OpenAI `model`, single `choices` entry and `usage`. Extra upstream metadata and

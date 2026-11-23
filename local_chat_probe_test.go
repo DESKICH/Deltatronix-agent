@@ -27,7 +27,7 @@ func TestChatProbeLeavesRoomForThinkingModels(t *testing.T) {
 	}))
 	defer server.Close()
 	settings := LLMSettings{BackendURL: server.URL + "/v1", ChatModel: "qwen3:8b", ChatContextTokens: 40960}
-	if err := probeLocalChat(context.Background(), settings, []string{"qwen3:8b"}); err != nil {
+	if _, err := probeLocalChat(context.Background(), settings, []string{"qwen3:8b"}); err != nil {
 		t.Fatalf("probe refused a thinking model: %v", err)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -130,7 +131,7 @@ func readChatBytes(r io.Reader, limit int) ([]byte, error) {
 	return b, nil
 }
 
-func decodeChatAssignment(data []byte, s LLMSettings) (chatAssignment, error) {
+func decodeChatAssignment(data []byte, s LLMSettings, bytesPerToken float64) (chatAssignment, error) {
 	var job chatAssignment
 	if len(data) > maxChatBytes || decodeChatJSON(data, &job) != nil || job.Type != "job.assign" ||
 		job.JobType != "LLM_CHAT_TOOLS" || !validChatName(job.JobID, 128) {
@@ -142,7 +143,7 @@ func decodeChatAssignment(data []byte, s LLMSettings) (chatAssignment, error) {
 	if time.Until(job.ExpiresAt) <= 0 || time.Until(job.ExpiresAt) > 5*time.Minute {
 		return job, errors.New("CHAT_EXPIRED: expiresAt must be in the next five minutes")
 	}
-	if err := validateChatPayload(job.Payload, s.ChatContextTokens); err != nil {
+	if err := validateChatPayload(job.Payload, s.ChatContextTokens, bytesPerToken); err != nil {
 		return job, err
 	}
 	return job, nil
@@ -225,13 +226,19 @@ func checkChatJSON(data []byte) error {
 	return nil
 }
 
-func validateChatPayload(p chatPayload, contextTokens int) error {
+// requestTokens estimates a request's tokens from its serialized bytes at the
+// model's measured ratio; below one byte a token it counts bytes.
+func requestTokens(bytes int, bytesPerToken float64) int {
+	return int(math.Ceil(float64(bytes) / max(bytesPerToken, 1)))
+}
+
+func validateChatPayload(p chatPayload, contextTokens int, bytesPerToken float64) error {
 	bad := errors.New("CHAT_INVALID_REQUEST: use bounded text messages, strict function tools and a positive maxTokens")
 	if len(p.Messages) == 0 || len(p.Messages) > 64 || len(p.Tools) > 20 || p.MaxTokens < 1 || p.MaxTokens > 8192 {
 		return bad
 	}
 	data, err := json.Marshal(p)
-	if err != nil || len(data) > maxChatBytes || len(data)+p.MaxTokens+1024 > contextTokens {
+	if err != nil || len(data) > maxChatBytes || requestTokens(len(data), bytesPerToken)+p.MaxTokens+1024 > contextTokens {
 		return errors.New("CHAT_CONTEXT_LIMIT: narrow messages/tools or increase the explicit context cap")
 	}
 	names := map[string]bool{}
@@ -284,24 +291,14 @@ func validateChatPayload(p chatPayload, contextTokens int) error {
 
 func callLocalChat(ctx context.Context, s LLMSettings, p chatPayload) (chatCompletion, error) {
 	var result chatCompletion
-	data, err := json.Marshal(map[string]any{"model": p.Model, "messages": p.Messages, "tools": p.Tools, "stream": false, "max_tokens": p.MaxTokens})
-	if err != nil || len(data) > maxChatBytes {
-		return result, errors.New("CHAT_INVALID_REQUEST")
+	var body []byte
+	var err error
+	if root, ok := ollamaRoot(ctx, s); ok {
+		body, err = ollamaChat(ctx, root, s.ChatContextTokens, p)
+	} else {
+		body, err = postLocalChat(ctx, strings.TrimRight(s.BackendURL, "/")+"/chat/completions",
+			map[string]any{"model": p.Model, "messages": p.Messages, "tools": p.Tools, "stream": false, "max_tokens": p.MaxTokens})
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(s.BackendURL, "/")+"/chat/completions", bytes.NewReader(data))
-	if err != nil {
-		return result, errors.New("CHAT_BACKEND_UNAVAILABLE")
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := localChatHTTP.Do(req)
-	if err != nil {
-		return result, errors.New("CHAT_BACKEND_UNAVAILABLE: check the local server or cancellation/expiry")
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return result, fmt.Errorf("CHAT_BACKEND_STATUS: local server returned %d", resp.StatusCode)
-	}
-	body, err := readChatBytes(resp.Body, maxChatBytes)
 	if err != nil {
 		return result, err
 	}
@@ -322,6 +319,137 @@ func callLocalChat(ctx context.Context, s LLMSettings, p chatPayload) (chatCompl
 		return result, errors.New("CHAT_INVALID_RESPONSE: invalid assistant completion or usage")
 	}
 	return result, nil
+}
+
+// postLocalChat sends one request to the local server and reads its reply.
+func postLocalChat(ctx context.Context, endpoint string, request any) ([]byte, error) {
+	data, err := json.Marshal(request)
+	if err != nil || len(data) > maxChatBytes {
+		return nil, errors.New("CHAT_INVALID_REQUEST")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(data))
+	if err != nil {
+		return nil, errors.New("CHAT_BACKEND_UNAVAILABLE")
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := localChatHTTP.Do(req)
+	if err != nil {
+		return nil, errors.New("CHAT_BACKEND_UNAVAILABLE: check the local server or cancellation/expiry")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("CHAT_BACKEND_STATUS: local server returned %d", resp.StatusCode)
+	}
+	return readChatBytes(resp.Body, maxChatBytes)
+}
+
+// ollamaRoot reports whether the /v1 server is Ollama, and its root URL. Its
+// /v1 endpoint takes no context size, so a declared context only applies
+// through the native chat endpoint (docs.ollama.com/api/openai-compatibility).
+// ponytail: one loopback GET per chat request; cache it if that ever shows.
+func ollamaRoot(ctx context.Context, s LLMSettings) (string, bool) {
+	root := strings.TrimSuffix(strings.TrimRight(s.BackendURL, "/"), "/v1")
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, root+"/api/version", nil)
+	if err != nil {
+		return "", false
+	}
+	resp, err := localChatHTTP.Do(req)
+	if err != nil {
+		return "", false
+	}
+	defer resp.Body.Close()
+	var answer struct {
+		Version *string `json:"version"`
+	}
+	body, err := readChatBytes(resp.Body, 4<<10)
+	return root, err == nil && resp.StatusCode == http.StatusOK && json.Unmarshal(body, &answer) == nil && answer.Version != nil
+}
+
+type ollamaToolCall struct {
+	ID       string `json:"id,omitempty"`
+	Function struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	} `json:"function"`
+}
+
+type ollamaMessage struct {
+	Role      string           `json:"role"`
+	Content   string           `json:"content"`
+	ToolCalls []ollamaToolCall `json:"tool_calls,omitempty"`
+	ToolName  string           `json:"tool_name,omitempty"`
+}
+
+// ollamaChat runs one completion on Ollama's native chat endpoint with the
+// declared context and returns it in the OpenAI completion shape the rest of
+// the companion checks: calls get ids and string arguments, private reasoning
+// is dropped, usage comes from the native counts.
+func ollamaChat(ctx context.Context, root string, contextTokens int, p chatPayload) ([]byte, error) {
+	messages := make([]ollamaMessage, len(p.Messages))
+	toolOf := map[string]string{}
+	for i, m := range p.Messages {
+		var text string
+		_ = json.Unmarshal(m.Content, &text) // null stays ""
+		messages[i] = ollamaMessage{Role: m.Role, Content: text, ToolName: toolOf[m.ToolCallID]}
+		for _, call := range m.ToolCalls {
+			native := ollamaToolCall{ID: call.ID}
+			native.Function.Name = call.Function.Name
+			native.Function.Arguments = json.RawMessage(call.Function.Arguments)
+			messages[i].ToolCalls = append(messages[i].ToolCalls, native)
+			toolOf[call.ID] = call.Function.Name
+		}
+	}
+	body, err := postLocalChat(ctx, root+"/api/chat", map[string]any{
+		"model": p.Model, "messages": messages, "tools": p.Tools, "stream": false,
+		"options": map[string]any{"num_ctx": contextTokens, "num_predict": p.MaxTokens},
+	})
+	if err != nil {
+		return nil, err
+	}
+	var reply struct {
+		Model   string `json:"model"`
+		Message struct {
+			Role      string           `json:"role"`
+			Content   string           `json:"content"`
+			ToolCalls []ollamaToolCall `json:"tool_calls"`
+		} `json:"message"`
+		DoneReason string `json:"done_reason"`
+		Prompt     int    `json:"prompt_eval_count"`
+		Completion int    `json:"eval_count"`
+	}
+	if checkChatJSON(body) != nil || json.Unmarshal(body, &reply) != nil {
+		return nil, errors.New("CHAT_INVALID_RESPONSE: expected one completion from the selected model")
+	}
+	message := map[string]any{"role": reply.Message.Role, "content": reply.Message.Content}
+	finish := "stop"
+	switch {
+	case reply.DoneReason == "length":
+		finish = "length"
+	case len(reply.Message.ToolCalls) > 0:
+		finish = "tool_calls"
+		calls := make([]chatToolCall, len(reply.Message.ToolCalls))
+		for i, native := range reply.Message.ToolCalls {
+			calls[i] = chatToolCall{ID: native.ID, Type: "function"}
+			if !validChatName(native.ID, 128) {
+				id := make([]byte, 8)
+				_, _ = rand.Read(id)
+				calls[i].ID = "call_" + hex.EncodeToString(id)
+			}
+			calls[i].Function.Name = native.Function.Name
+			calls[i].Function.Arguments = string(native.Function.Arguments)
+		}
+		message["tool_calls"] = calls
+		if reply.Message.Content == "" {
+			message["content"] = nil
+		}
+	}
+	return json.Marshal(map[string]any{
+		"model":   reply.Model,
+		"choices": []any{map[string]any{"index": 0, "finish_reason": finish, "message": message}},
+		"usage":   map[string]int{"prompt_tokens": reply.Prompt, "completion_tokens": reply.Completion, "total_tokens": reply.Prompt + reply.Completion},
+	})
 }
 
 // invalidRoundRetries bounds how often a round with no valid call is answered
@@ -458,11 +586,16 @@ func withRefusedCalls(messages []chatMessage) []chatMessage {
 // before its tool call; at 128 qwen3:8b spent the whole budget reasoning.
 const chatProbeMaxTokens = 1024
 
-// probeLocalChat runs one scripted tool round on the selected model; the error
-// says why chat stays unavailable.
-func probeLocalChat(ctx context.Context, s LLMSettings, installed []string) error {
+// maxBytesPerToken caps the measured ratio: a cached probe prompt reports few
+// tokens, and a ratio too high would let a request past the context.
+const maxBytesPerToken = 3.0
+
+// probeLocalChat runs one scripted tool round on the selected model and
+// returns the request bytes its tokenizer packs into a token (1 when the
+// server reports no usage); the error says why chat stays unavailable.
+func probeLocalChat(ctx context.Context, s LLMSettings, installed []string) (float64, error) {
 	if !localChatSettings(s) || !slices.Contains(installed, s.ChatModel) {
-		return errors.New("chat_model is not installed")
+		return 0, errors.New("chat_model is not installed")
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, chatTimeout)
 	defer cancel()
@@ -470,24 +603,29 @@ func probeLocalChat(ctx context.Context, s LLMSettings, installed []string) erro
 	_ = json.Unmarshal([]byte(`{"messages":[{"role":"user","content":"Call dtx_probe once with ok true. Do not answer with text."}],"tools":[{"type":"function","function":{"name":"dtx_probe","description":"Confirm tool support.","strict":true,"parameters":{"type":"object","properties":{"ok":{"type":"boolean","const":true}},"required":["ok"],"additionalProperties":false}}}]}`), &p)
 	p.Model = s.ChatModel
 	p.MaxTokens = chatProbeMaxTokens
-	if err := validateChatPayload(p, s.ChatContextTokens); err != nil {
-		return err
+	if err := validateChatPayload(p, s.ChatContextTokens, 1); err != nil {
+		return 0, err
 	}
 	result, err := callLocalChat(probeCtx, s, p)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if len(result.Choices[0].Message.ToolCalls) != 1 {
-		return errors.New("the model answered without exactly one tool call")
+		return 0, errors.New("the model answered without exactly one tool call")
 	}
 	call := result.Choices[0].Message.ToolCalls[0]
 	var args struct {
 		OK bool `json:"ok"`
 	}
 	if call.Function.Name != "dtx_probe" || decodeChatJSON([]byte(call.Function.Arguments), &args) != nil || !args.OK {
-		return errors.New("the model's tool call did not match the probe")
+		return 0, errors.New("the model's tool call did not match the probe")
 	}
-	return nil
+	if result.Usage.Prompt <= 0 {
+		return 1, nil
+	}
+	sent, _ := json.Marshal(p)
+	ratio := math.Floor(float64(len(sent))/float64(result.Usage.Prompt)*10) / 10
+	return min(max(ratio, 1), maxBytesPerToken), nil
 }
 
 func validToolName(name string) bool {
