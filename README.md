@@ -519,3 +519,41 @@ memory/process-tree/container isolation is claimed. Production signer/key
 ownership, scoped paired transport and structured runtime/attempt/lease receipts
 remain required before backend execution; caller-authored local scope is not a
 backend authorization grant.
+
+### Opt-in paired Pack project advertisement (prerequisite)
+
+The daemon can send Backend's `runner.register` on its existing authenticated
+paired WebSocket. It is disabled unless an operator independently installs
+`pack-runner.json` beside the pairing `config.json` (or in the explicit
+`DTX_AGENT_CONFIG_DIR` profile). The approval is **not** downloaded from a job,
+server frame, descriptor or pairing response. Its shape is:
+
+```json
+{
+  "apiUrl": "https://your-reviewed-api.example",
+  "agentId": "your-exact-paired-agent-id",
+  "projectIds": ["your-approved-project-id"],
+  "binary": "/absolute/reviewed/pack-readonly",
+  "descriptor": "/absolute/reviewed/descriptor.json",
+  "publicKey": "/absolute/independently-approved/public.pem",
+  "keyId": "independently-approved-signer",
+  "artifactId": "independently-approved-immutable-artifact-id"
+}
+```
+
+Use private local profile permissions. There is no installed production signer,
+release selection or enabled configuration. After the first authenticated server config on each connection, the daemon
+checks exact pairing API/agent identity, 1–16 distinct project IDs, the signature,
+independent artifact pin, current OS/architecture, executable hash/length and
+pinned Deno/Pack versions through the existing release verifier. Only then does
+it advertise Pack/core/runtime versions and the approved projects. Backend still
+checks the authenticated pairing's actual project ownership and filters roster
+visibility. A matching `runner.registered` acknowledgement is logged separately
+from socket connectivity; a refusal or mismatched acknowledgement is unavailable.
+The acknowledgement is connection-local and re-verification occurs on reconnect.
+
+This is an advertisement, not authorization, task admission, a lease, sandbox
+attestation, executable readiness or saved completion. It adds no task claims or
+Pack job handler and leaves Shape/chat/vision capability frames unchanged. Stop
+the daemon before changing/removing approval or release files, then restart;
+configuration is read at connection time, not watched during a connection.

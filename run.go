@@ -161,6 +161,9 @@ type agent struct {
 	nativeCap      bool
 	nativeReady    bool
 	jobs           map[string]context.CancelFunc
+
+	packRegistration *runnerRegistration
+	packRegistered   bool
 }
 
 // Retain tombstones across reconnects, scoped to the exact pairing identity.
@@ -253,6 +256,9 @@ func (a *agent) sendLocked(v any) {
 }
 
 func (a *agent) dispatch(data []byte) {
+	if a.onPackRunnerFrame(data) {
+		return
+	}
 	// Shape native frames route first, so the chat envelope checks below never
 	// refuse them.
 	var native struct {
@@ -338,10 +344,15 @@ func (a *agent) dispatch(data []byte) {
 
 func (a *agent) onConfig(visionModels []string) {
 	a.mu.Lock()
+	firstConfig := !a.configured
 	a.visionModels = visionModels
 	a.configRevision++
 	a.configured = true
 	a.mu.Unlock()
+	// The server config follows authenticated gateway listener installation.
+	if firstConfig {
+		a.registerPackRunner()
+	}
 	select {
 	case a.probeRequested <- struct{}{}:
 	default:
