@@ -25,11 +25,16 @@ func main() {
 
 	// --headless forces the no-GUI daemon; strip it so it works before or after
 	// the subcommand (`dtx-agent run --headless`, `dtx-agent --headless`).
+	// --no-update turns self-update off the same way its env var does.
 	headless := false
 	var args []string
 	for _, a := range os.Args[1:] {
 		if a == "--headless" {
 			headless = true
+			continue
+		}
+		if a == "--no-update" {
+			os.Setenv(noUpdateEnv, "1")
 			continue
 		}
 		args = append(args, a)
@@ -91,7 +96,7 @@ func usage() {
 Usage:
   dtx-agent pair <code> [--api https://api.deltatronix.io]
   dtx-agent pair --code-stdin [--api https://api.deltatronix.io]
-  dtx-agent run [--headless]
+  dtx-agent run [--headless] [--no-update]
   dtx-agent pack-http-fixture --policy <independent-local-policy.json> [--approve-api https://api.deltatronix.io]
   dtx-agent autostart enable [--headless] [--mode xdg|systemd]
   dtx-agent autostart disable
@@ -103,6 +108,10 @@ Without --headless, run opens a window (Status, Settings, About) and a
 system-tray icon (Current Status, Open, Quit). Use --headless (or run with no
 display) for servers/systemd/Docker. The autostart and path commands work in
 both the GUI and headless builds.
+
+While running, the agent checks GitHub Releases for a newer version, verifies
+it against the release's SHA256SUMS and, when no job is running, installs it
+and restarts. Turn this off with --no-update or DTX_AGENT_NO_UPDATE=1.
 `)
 }
 

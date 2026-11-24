@@ -3,6 +3,10 @@ name: release
 on:
   push:
     tags: ["v*"]
+  # A change to this pipeline builds every platform on its PR (nothing is
+  # published), so a broken build shows before a tag makes a half release.
+  pull_request:
+    paths: [".github/workflows/release.yml"]
 
 permissions:
   contents: write
@@ -10,6 +14,7 @@ permissions:
 # The desktop GUI (Fyne + tray) needs CGo (Cocoa / GTK+GL+AppIndicator) and the
 # `gui` build tag, so those builds run on native per-OS runners. The headless
 # binary (Docker/servers) is CGO-free and cross-compiles on one Linux job.
+# arm64 Linux and Windows build on GitHub's arm64 runners (free for public repos).
 jobs:
   # The tag must name the version the binaries report, and master's tests must
   # pass on the tagged commit, before anything is built or published.
@@ -21,6 +26,7 @@ jobs:
         with:
           go-version: "1.26"
       - name: Tag matches version.go
+        if: github.event_name == 'push'
         run: grep -q "version = \"${GITHUB_REF_NAME#v}\"" version.go
       - name: Test
         run: go test ./...
@@ -28,6 +34,9 @@ jobs:
   build-headless:
     needs: check
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goarch: [amd64, arm64]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -36,18 +45,23 @@ jobs:
       - name: Build (no GUI, static)
         env:
           GOOS: linux
-          GOARCH: amd64
+          GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
         # No -tags gui → no Fyne/GL; static binary for minimal containers.
-        run: go build -trimpath -ldflags "-s -w" -o "dist/dtx-agent-linux-amd64-headless" .
+        run: go build -trimpath -ldflags "-s -w" -o "dist/dtx-agent-linux-${{ matrix.goarch }}-headless" .
       - uses: actions/upload-artifact@v4
         with:
-          name: dtx-agent-linux-amd64-headless
+          name: dtx-agent-linux-${{ matrix.goarch }}-headless
           path: dist/*
 
   build-linux:
     needs: check
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - { goarch: amd64, runner: ubuntu-latest }
+          - { goarch: arm64, runner: ubuntu-24.04-arm }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -59,33 +73,50 @@ jobs:
       - name: Build
         env:
           GOOS: linux
-          GOARCH: amd64
+          GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "1"
-        # linux-arm64 dropped for now: CGo GUI needs an arm runner or GL cross-libs.
-        run: go build -tags gui -trimpath -ldflags "-s -w" -o "dist/dtx-agent-linux-amd64" .
+        run: go build -tags gui -trimpath -ldflags "-s -w" -o "dist/dtx-agent-linux-${{ matrix.goarch }}" .
       - uses: actions/upload-artifact@v4
         with:
-          name: dtx-agent-linux-amd64
+          name: dtx-agent-linux-${{ matrix.goarch }}
           path: dist/*
 
   build-windows:
     needs: check
-    runs-on: windows-latest
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - { goarch: amd64, runner: windows-latest, cc: gcc }
+          - { goarch: arm64, runner: windows-11-arm, cc: clang }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
+      # The x64 image ships MinGW gcc; arm64 CGo needs MSYS2's native clang.
+      - name: Install the arm64 C toolchain
+        if: matrix.goarch == 'arm64'
+        id: msys2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANGARM64
+          install: mingw-w64-clang-aarch64-clang
+      - name: Put it on PATH
+        if: matrix.goarch == 'arm64'
+        shell: pwsh
+        run: Add-Content $env:GITHUB_PATH "${{ steps.msys2.outputs.msys2-location }}\clangarm64\bin"
       - name: Build
         env:
           GOOS: windows
-          GOARCH: amd64
+          GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "1"
+          CC: ${{ matrix.cc }}
         # -H=windowsgui: no console window for the GUI/tray app.
-        run: go build -tags gui -trimpath -ldflags "-H=windowsgui -s -w" -o "dist/dtx-agent-windows-amd64.exe" .
+        run: go build -tags gui -trimpath -ldflags "-H=windowsgui -s -w" -o "dist/dtx-agent-windows-${{ matrix.goarch }}.exe" .
       - uses: actions/upload-artifact@v4
         with:
-          name: dtx-agent-windows-amd64
+          name: dtx-agent-windows-${{ matrix.goarch }}
           path: dist/*
 
   build-macos:
@@ -111,6 +142,7 @@ jobs:
           path: dist/*
 
   release:
+    if: github.event_name == 'push'
     needs: [build-headless, build-linux, build-windows, build-macos]
     runs-on: ubuntu-latest
     steps:
@@ -119,9 +151,11 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      # The companion's self-update installs only a file whose SHA-256 matches
+      # this list. Releases are unsigned, so this proves integrity, not origin.
+      - name: Checksums
+        run: cp llm.txt dist/ && cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/*
-            llm.txt
+          files: dist/*

@@ -660,7 +660,7 @@ func runNativePairedFixture(t *testing.T, fixture nativePairedFixture, scenario 
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, exe, "-test.run=^TestNativeProcessStopCleansContainer$", "-test.v")
-	cmd.Env = append(os.Environ(), "DTX_NATIVE_STOP_CHILD=1", "DTX_NATIVE_STOP_API="+server.URL)
+	cmd.Env = append(os.Environ(), noUpdateEnv+"=1", "DTX_NATIVE_STOP_CHILD=1", "DTX_NATIVE_STOP_API="+server.URL)
 	log := &boundedoutput.Buffer{Max: 64 << 10, Overflow: cancel}
 	cmd.Stdout = log
 	cmd.Stderr = log

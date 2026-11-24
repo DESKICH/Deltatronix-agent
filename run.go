@@ -53,11 +53,12 @@ func cmdRun(headless bool) error {
 	return nil
 }
 
-// connectForever runs the connect loop until the process exits — the headless
-// entrypoint.
+// connectForever runs the connect loop and the self-update check until the
+// process exits — the headless entrypoint.
 func connectForever(cfg Config) {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+	go autoUpdate(ctx, restartHeadless)
 	connectLoop(ctx, cfg)
 }
 
@@ -223,6 +224,17 @@ func serve(parent context.Context, cfg Config, url string) (connected bool, err 
 		log.Printf("native recovery unavailable: %v", recoveryErr)
 	}
 	a := &agent{nativeReady: recoveryErr == nil, cfg: cfg, conn: conn, ctx: ctx, settings: loadLLMSettings(), jobs: map[string]context.CancelFunc{}, probeRequested: make(chan struct{}, 1)}
+	// A self-update restarts only while this connection's job slot is free.
+	jobSlot.Lock()
+	jobSlot.a = a
+	jobSlot.Unlock()
+	defer func() {
+		jobSlot.Lock()
+		if jobSlot.a == a {
+			jobSlot.a = nil
+		}
+		jobSlot.Unlock()
+	}()
 	defer func() { cancel(); a.jobsWG.Wait() }()
 	a.launchJob(a.reprobeLoop)
 
