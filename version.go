@@ -4,5 +4,5 @@ package main
 // shown in the tray tooltip and the About dialog. Bump version here on release.
 const (
 	appName = "Deltatronix agent"
-	version = "0.1.4"
+	version = "0.1.5"
 )

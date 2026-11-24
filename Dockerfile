@@ -15,4 +15,6 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/dtx-agent .
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/dtx-agent /dtx-agent
+# An image is updated by pulling a newer image, never by replacing its binary.
+ENV DTX_AGENT_NO_UPDATE=1
 ENTRYPOINT ["/dtx-agent", "run", "--headless"]

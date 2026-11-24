@@ -7,7 +7,6 @@ import (
 	_ "embed"
 	"fmt"
 	"log"
-	"os/exec"
 	"runtime"
 	"strconv"
 	"time"
@@ -45,6 +44,9 @@ func statusPill(o fyne.CanvasObject) fyne.CanvasObject {
 	pill := container.NewStack(rect, container.NewPadded(o))
 	return container.NewHBox(pill, layout.NewSpacer())
 }
+
+// guiBuild picks this build's release file: the desktop one.
+const guiBuild = true
 
 //go:embed resources/tray/icon.png
 var iconPNG []byte
@@ -93,6 +95,14 @@ func runGUI() error {
 		w.Show()
 	}
 	refreshStatus()
+
+	go autoUpdate(context.Background(), func(exe string) error {
+		if err := startSelf(exe); err != nil {
+			return err
+		}
+		fyne.Do(a.Quit)
+		return nil
+	})
 
 	a.Run()
 	return nil
@@ -388,12 +398,10 @@ func buildAboutPage() fyne.CanvasObject {
 // settings take effect with one click.
 func relaunch(a fyne.App) {
 	exe, err := selfPath()
-	if err != nil {
-		log.Printf("relaunch: %v", err)
-		a.Quit()
-		return
+	if err == nil {
+		err = startSelf(exe)
 	}
-	if err := exec.Command(exe, "run").Start(); err != nil {
+	if err != nil {
 		log.Printf("relaunch: %v", err)
 	}
 	a.Quit()

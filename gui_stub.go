@@ -4,6 +4,9 @@ package main
 
 import "errors"
 
+// guiBuild picks this build's release file: the headless one.
+const guiBuild = false
+
 // runGUI is the headless build's stand-in: there is no window, so tell the user
 // to run the daemon explicitly. Reached only if someone runs the headless binary
 // interactively on a machine with a display.

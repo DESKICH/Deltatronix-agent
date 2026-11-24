@@ -30,9 +30,13 @@ Each release has one file per platform:
 | `dtx-agent-darwin-arm64` | macOS, Apple silicon, desktop app |
 | `dtx-agent-darwin-amd64` | macOS, Intel, desktop app |
 | `dtx-agent-windows-amd64.exe` | Windows x64, desktop app |
+| `dtx-agent-windows-arm64.exe` | Windows on Arm, desktop app |
 | `dtx-agent-linux-amd64` | Linux x64, desktop app |
+| `dtx-agent-linux-arm64` | Linux Arm64, desktop app |
 | `dtx-agent-linux-amd64-headless` | Linux x64, headless (servers, containers) |
+| `dtx-agent-linux-arm64-headless` | Linux Arm64, headless (servers, Raspberry Pi) |
 | `llm.txt` | The default settings template |
+| `SHA256SUMS` | SHA-256 of every file above (`sha256sum -c SHA256SUMS`) |
 
 The desktop builds also run headless with `run --headless`. Rename the file to
 `dtx-agent` (`dtx-agent.exe` on Windows) and make it executable on macOS and
@@ -48,6 +52,21 @@ with "cannot be opened because the developer cannot be verified"; after
 checking the file came from this repository's release page, clear the
 download flag once with `xattr -d com.apple.quarantine dtx-agent`. Windows
 SmartScreen may ask you to confirm with **More info → Run anyway**.
+
+### Automatic updates
+
+A running agent checks this repository's latest release when it starts and every
+six hours. When the release is newer, it downloads the file for its own platform,
+checks it against the release's `SHA256SUMS`, and only then replaces its own
+binary and restarts. It waits until no job is running, and logs
+`auto-update: installing dtx-agent vX.Y.Z (was A.B.C) and restarting`. A release
+without `SHA256SUMS`, a file that does not match it, or a folder the agent cannot
+write to leaves the current version running, with the reason in the log.
+
+Because releases are not code-signed, the checksum proves the file is the one the
+release workflow published, not who published it. Turn updates off with
+`--no-update` (`dtx-agent run --no-update`) or `DTX_AGENT_NO_UPDATE=1`; the
+Docker image sets that variable, since an image is updated by pulling a new one.
 
 ## Build from source
 
