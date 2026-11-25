@@ -18,6 +18,7 @@ import (
 
 const MaxExecutableBytes int64 = 128 << 20
 const MaxDescriptorBytes = 64 << 10
+const LegacyPackCoreVersion = "0.1.0"
 
 var sha = regexp.MustCompile(`^[a-f0-9]{64}$`)
 var commit = regexp.MustCompile(`^[a-f0-9]{40}$`)
@@ -88,8 +89,14 @@ func artifactID(d Descriptor) (string, error) {
 	h := sha256.Sum256(b)
 	return "pack-readonly-v1-" + hex.EncodeToString(h[:]), nil
 }
+
+// SupportsPackCoreVersion limits the descriptor contract to reviewed releases.
+func SupportsPackCoreVersion(version string) bool {
+	return version == LegacyPackCoreVersion || version == "0.1.1"
+}
+
 func validate(d Descriptor) error {
-	if d.SchemaVersion != 1 || d.Domain != "pack" || d.Action != "pack.evaluate_snapshot" || d.DenoVersion != "2.9.8" || d.PackCoreVersion != "0.1.0" || !commit.MatchString(d.WorkerHostCommit) || d.Executable.Name != "pack-readonly" || !sha.MatchString(d.Executable.SHA256) || d.Executable.Size <= 0 || d.Executable.Size > MaxExecutableBytes {
+	if d.SchemaVersion != 1 || d.Domain != "pack" || d.Action != "pack.evaluate_snapshot" || d.DenoVersion != "2.9.8" || !SupportsPackCoreVersion(d.PackCoreVersion) || !commit.MatchString(d.WorkerHostCommit) || d.Executable.Name != "pack-readonly" || !sha.MatchString(d.Executable.SHA256) || d.Executable.Size <= 0 || d.Executable.Size > MaxExecutableBytes {
 		return errors.New("unsupported Pack release descriptor")
 	}
 	switch d.Platform {
@@ -106,15 +113,18 @@ func validate(d Descriptor) error {
 
 // Build signs exact binary identity and the reviewed source/version tuple. A signer is
 // responsible for reproducing those bytes; this function does not claim to inspect a binary.
-func Build(binary io.Reader, platform, workerHostCommit, keyID string, key ed25519.PrivateKey) (Descriptor, error) {
+func Build(binary io.Reader, platform, workerHostCommit, packCoreVersion, keyID string, key ed25519.PrivateKey) (Descriptor, error) {
 	if !keyName.MatchString(keyID) || len(key) != ed25519.PrivateKeySize {
 		return Descriptor{}, errors.New("invalid Pack release signing key")
+	}
+	if !SupportsPackCoreVersion(packCoreVersion) {
+		return Descriptor{}, errors.New("unsupported Pack core version")
 	}
 	file, err := executableDigest(binary)
 	if err != nil {
 		return Descriptor{}, err
 	}
-	d := Descriptor{SchemaVersion: 1, Domain: "pack", Action: "pack.evaluate_snapshot", Platform: platform, DenoVersion: "2.9.8", PackCoreVersion: "0.1.0", WorkerHostCommit: workerHostCommit, Executable: file}
+	d := Descriptor{SchemaVersion: 1, Domain: "pack", Action: "pack.evaluate_snapshot", Platform: platform, DenoVersion: "2.9.8", PackCoreVersion: packCoreVersion, WorkerHostCommit: workerHostCommit, Executable: file}
 	d.ArtifactID, err = artifactID(d)
 	if err != nil {
 		return Descriptor{}, err

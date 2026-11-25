@@ -30,10 +30,11 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	binary := fs.String("binary", "", "exact locally built executable")
 	platform := fs.String("platform", "", "reviewed platform, e.g. darwin-arm64")
 	keyID := fs.String("key-id", "", "release-owner key ID")
-	var private, source, descriptor, public, artifact, input, principal, approval *string
+	var private, source, coreVersion, descriptor, public, artifact, input, principal, approval *string
 	if args[0] == "sign" {
 		private = fs.String("private-key", "", "release-owner PKCS8 Ed25519 PEM file")
 		source = fs.String("worker-host-commit", "", "reviewed full worker-host source commit")
+		coreVersion = fs.String("pack-core-version", packruntime.LegacyPackCoreVersion, "reviewed Pack core version in the compiled worker")
 	} else {
 		descriptor = fs.String("descriptor", "", "signed descriptor file")
 		public = fs.String("public-key", "", "independently reviewed Ed25519 PEM file")
@@ -51,6 +52,9 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	}
 	if fs.NArg() != 0 || *binary == "" || *platform == "" || *keyID == "" {
 		return errors.New("explicit binary, platform and release-owner key ID required")
+	}
+	if coreVersion != nil && !packruntime.SupportsPackCoreVersion(*coreVersion) {
+		return errors.New("unsupported Pack core version")
 	}
 	var f *os.File
 	var err error
@@ -82,7 +86,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 		if !ok {
 			return errors.New("release signing key must be Ed25519")
 		}
-		d, err := packruntime.Build(f, *platform, *source, *keyID, key)
+		d, err := packruntime.Build(f, *platform, *source, *coreVersion, *keyID, key)
 		if err != nil {
 			return err
 		}

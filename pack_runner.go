@@ -102,6 +102,9 @@ func loadPackRunner(cfg Config) (*packRunnerSelection, error) {
 	if err != nil {
 		return nil, err
 	}
+	if !packruntime.IsReviewedPortableWorker(verified) {
+		return nil, errors.New("Pack runner requires a reviewed worker host and engine version")
+	}
 	return &packRunnerSelection{registration: runnerRegistration{1, "companion", approved.ProjectIDs, []string{"pack"}, map[string]string{"@deltatronix/pack-core": verified.PackCoreVersion}, runnerRuntime{"deno", verified.DenoVersion}}, binary: approved.Binary, descriptor: descriptor, verified: verified, trust: trust}, nil
 }
 

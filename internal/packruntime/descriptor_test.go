@@ -19,7 +19,7 @@ func fixture(t *testing.T) (Descriptor, Trust, []byte, ed25519.PrivateKey) {
 		t.Fatal(err)
 	}
 	binary := []byte("local executable fixture, not a production runtime")
-	d, err := Build(bytes.NewReader(binary), "darwin-arm64", strings.Repeat("a", 40), "local-test", key)
+	d, err := Build(bytes.NewReader(binary), "darwin-arm64", strings.Repeat("a", 40), LegacyPackCoreVersion, "local-test", key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,9 +75,37 @@ func TestSignedDescriptorBindsExactBytesAndScopedTuple(t *testing.T) {
 func TestArtifactIdentityIncludesSourceAndPlatform(t *testing.T) {
 	d, _, binary, key := fixture(t)
 	for _, input := range [][2]string{{"linux-amd64", strings.Repeat("a", 40)}, {"darwin-arm64", strings.Repeat("b", 40)}} {
-		other, err := Build(bytes.NewReader(binary), input[0], input[1], "local-test", key)
+		other, err := Build(bytes.NewReader(binary), input[0], input[1], LegacyPackCoreVersion, "local-test", key)
 		if err != nil || other.ArtifactID == d.ArtifactID {
 			t.Fatalf("identity not scoped: %v", err)
+		}
+	}
+}
+
+func TestNewPackCoreVersionBindsExactArtifactSelection(t *testing.T) {
+	legacy, trust, binary, key := fixture(t)
+	next, err := Build(bytes.NewReader(binary), legacy.Platform, legacy.WorkerHostCommit, "0.1.1", trust.KeyID, key)
+	if err != nil || next.ArtifactID == legacy.ArtifactID || next.PackCoreVersion != "0.1.1" {
+		t.Fatalf("new release did not bind its version: %v", err)
+	}
+	if _, err := Verify(encoded(t, next), unreadable{t}, trust); err == nil {
+		t.Fatal("new core accepted under legacy artifact approval")
+	}
+	trust.ArtifactID = next.ArtifactID
+	got, err := Verify(encoded(t, next), bytes.NewReader(binary), trust)
+	if err != nil || got != next {
+		t.Fatalf("new signed release did not verify: %v", err)
+	}
+	if _, err := Verify(encoded(t, next), strings.NewReader("changed binary"), trust); err == nil {
+		t.Fatal("new release accepted a changed executable")
+	}
+	next.Signature.ValueBase64 = legacy.Signature.ValueBase64
+	if _, err := Verify(encoded(t, next), unreadable{t}, trust); err == nil {
+		t.Fatal("new release accepted a legacy signature")
+	}
+	for _, version := range []string{"", "0.1.2", "0.2.0", "latest"} {
+		if _, err := Build(unreadable{t}, legacy.Platform, legacy.WorkerHostCommit, version, trust.KeyID, key); err == nil {
+			t.Fatalf("built unsupported core %q", version)
 		}
 	}
 }
@@ -127,7 +155,7 @@ func TestBuildBoundsAndRejectsUnsupportedSource(t *testing.T) {
 		{strings.NewReader("x"), "unsupported", strings.Repeat("a", 40)},
 		{strings.NewReader("x"), "darwin-arm64", "branch-main"},
 	} {
-		if _, err := Build(input.binary, input.platform, input.source, "local-test", key); err == nil {
+		if _, err := Build(input.binary, input.platform, input.source, LegacyPackCoreVersion, "local-test", key); err == nil {
 			t.Fatal("invalid release input accepted")
 		}
 	}

@@ -458,7 +458,7 @@ clone, and build the agent, and keep their changes in their own forks.
 `go run ./cmd/pack-runtime-release` signs or verifies a **local** `pack-readonly`
 executable descriptor. It shares Shape's canonical Ed25519 signing representation,
 while Pack's descriptor fixes the domain/action (`pack.evaluate_snapshot`), Deno
-2.9.8, Pack core 0.1.0, platform, full worker-host source commit and bounded
+2.9.8, Pack core 0.1.0 or 0.1.1, platform, full worker-host source commit and bounded
 executable size/SHA-256. Its immutable ID covers that entire tuple. No URL, shell
 argument or task scope is accepted in a descriptor.
 
@@ -467,7 +467,7 @@ A release operator supplies their independently reviewed key and selection:
 ```sh
 go run ./cmd/pack-runtime-release sign \
   --binary ./pack-readonly --platform darwin-arm64 \
-  --worker-host-commit <full-reviewed-commit> \
+  --worker-host-commit <full-reviewed-commit> --pack-core-version 0.1.1 \
   --key-id <release-key-id> --private-key <PKCS8-Ed25519-PEM> > descriptor.json
 
 go run ./cmd/pack-runtime-release verify \
@@ -478,9 +478,12 @@ go run ./cmd/pack-runtime-release verify \
 
 The sign/verify commands do not generate a production key, install trust, download
 or execute a runtime, change agent configuration or advertise a Pack capability.
-Signing records the release operator's source/build assertion; verification proves
+The signing option defaults to 0.1.0 for legacy release commands. Supply the
+exact core version incorporated in the reviewed worker. Signing records the
+release operator's source/build assertion; verification proves
 that assertion's signature and exact bytes, not process confinement or backend
-resource authorization. Never take trust pins from a queued task or its descriptor.
+resource authorization. Execution requires the reviewed Pack core and Worker Host
+commit for that release. Never take trust pins from a queued task or its descriptor.
 
 Production Pack signer/key distribution and Companion paired job transport remain
 required by backend #748. UI #157 now proves standalone relative job reads after

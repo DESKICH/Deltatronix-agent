@@ -81,7 +81,7 @@ func validatePackHTTPPolicy(data []byte, selection *packRunnerSelection) (packHT
 			return policy, errors.New("invalid Pack fixture identity")
 		}
 	}
-	if policy.Attempt < 1 || policy.Attempt > 9007199254740991 || policy.Input.Version < 0 || policy.Input.Version > 9007199254740991 || policy.Input.ByteSize <= 0 || policy.Input.ByteSize > 16<<20 || !packHTTPHash.MatchString(policy.Input.ContentHash) || !slices.Contains(selection.registration.ProjectIDs, policy.Input.ProjectID) || selection.verified.WorkerHostCommit != packruntime.PortableWorkerHostCommit {
+	if policy.Attempt < 1 || policy.Attempt > 9007199254740991 || policy.Input.Version < 0 || policy.Input.Version > 9007199254740991 || policy.Input.ByteSize <= 0 || policy.Input.ByteSize > 16<<20 || !packHTTPHash.MatchString(policy.Input.ContentHash) || !slices.Contains(selection.registration.ProjectIDs, policy.Input.ProjectID) || !packruntime.IsReviewedPortableWorker(selection.verified) {
 		return policy, errors.New("Pack fixture policy or reviewed runtime unavailable")
 	}
 	return policy, nil

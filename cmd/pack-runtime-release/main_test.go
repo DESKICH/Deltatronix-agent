@@ -43,11 +43,15 @@ func keys(t *testing.T, dir string) (string, string) {
 	}
 	return privatePath, publicPath
 }
-func signAndVerify(t *testing.T, binary, dir string) (packruntime.Descriptor, string, string) {
+func signAndVerify(t *testing.T, binary, dir, packCoreVersion string) (packruntime.Descriptor, string, string) {
 	t.Helper()
 	private, public := keys(t, dir)
 	var out bytes.Buffer
-	if err := run(context.Background(), []string{"sign", "--binary", binary, "--platform", runtime.GOOS + "-" + runtime.GOARCH, "--worker-host-commit", packruntime.PortableWorkerHostCommit, "--key-id", "ephemeral-local-test", "--private-key", private}, &out); err != nil {
+	sign := []string{"sign", "--binary", binary, "--platform", runtime.GOOS + "-" + runtime.GOARCH, "--worker-host-commit", packruntime.PortableWorkerHostCommit, "--key-id", "ephemeral-local-test", "--private-key", private}
+	if packCoreVersion != "" {
+		sign = append(sign, "--pack-core-version", packCoreVersion)
+	}
+	if err := run(context.Background(), sign, &out); err != nil {
 		t.Fatal(err)
 	}
 	var d packruntime.Descriptor
@@ -79,7 +83,18 @@ func TestOfflineReleaseToolSignsAndVerifies(t *testing.T) {
 	if err := os.WriteFile(binary, []byte("local fixture, not executed"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	signAndVerify(t, binary, dir)
+	legacy, _, _ := signAndVerify(t, binary, dir, "")
+	if legacy.PackCoreVersion != packruntime.LegacyPackCoreVersion {
+		t.Fatal("legacy signing invocation changed")
+	}
+	next, _, _ := signAndVerify(t, binary, t.TempDir(), "0.1.1")
+	if next.PackCoreVersion != "0.1.1" || next.ArtifactID == legacy.ArtifactID {
+		t.Fatal("signer did not bind the selected reviewed Pack core")
+	}
+	var out bytes.Buffer
+	if err := run(context.Background(), []string{"sign", "--pack-core-version", "0.1.2", "--binary", "unused-binary", "--platform", runtime.GOOS + "-" + runtime.GOARCH, "--key-id", "unused-key", "--private-key", "unused-key"}, &out); err == nil || !strings.Contains(err.Error(), "unsupported Pack core version") || out.Len() != 0 {
+		t.Fatal("unknown engine version reached local files or produced a descriptor")
+	}
 }
 func TestOfflineReleaseToolRejectsNonRegularInputs(t *testing.T) {
 	dir := t.TempDir()
@@ -106,7 +121,7 @@ func TestActualCompiledPackWorkerRelease(t *testing.T) {
 		t.Skip("requires ephemeral actual UI #157 compiled Pack fixture")
 	}
 
-	d, descriptor, public := signAndVerify(t, binary, t.TempDir())
+	d, descriptor, public := signAndVerify(t, binary, t.TempDir(), "")
 	if d.Executable.Size < 1<<20 {
 		t.Fatal("expected actual compiled Deno worker")
 	}
@@ -173,7 +188,7 @@ func TestActualCompiledPackAssignment(t *testing.T) {
 	if binary == "" || root == "" {
 		t.Skip("requires ephemeral actual UI #157 compiled Pack fixture")
 	}
-	d, descriptor, public := signAndVerify(t, binary, t.TempDir())
+	d, descriptor, public := signAndVerify(t, binary, t.TempDir(), "")
 	if d.Executable.Size < 1<<20 {
 		t.Fatal("expected actual compiled Deno worker")
 	}

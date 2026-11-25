@@ -25,6 +25,11 @@ import (
 
 func approvedPackRunner(t *testing.T) (Config, packRunnerConfig) {
 	t.Helper()
+	return approvedPackRunnerTuple(t, packruntime.LegacyPackCoreVersion, packruntime.PortableWorkerHostCommit)
+}
+
+func approvedPackRunnerTuple(t *testing.T, version, commit string) (Config, packRunnerConfig) {
+	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("DTX_AGENT_CONFIG_DIR", dir)
 	cfg := Config{APIURL: "https://example.invalid", AgentID: "paired-fixture", AgentToken: "synthetic"}
@@ -33,7 +38,7 @@ func approvedPackRunner(t *testing.T) (Config, packRunnerConfig) {
 		t.Fatal(err)
 	}
 	binary := []byte("synthetic signed runtime; not executable or production trust")
-	descriptor, err := packruntime.Build(bytes.NewReader(binary), runtime.GOOS+"-"+runtime.GOARCH, packruntime.PortableWorkerHostCommit, "fixture", private)
+	descriptor, err := packruntime.Build(bytes.NewReader(binary), runtime.GOOS+"-"+runtime.GOARCH, commit, version, "fixture", private)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,6 +59,13 @@ func approvedPackRunner(t *testing.T) (Config, packRunnerConfig) {
 	writePackApproval(t, approval)
 	return cfg, approval
 }
+func TestPackRunnerRefusesSignedSourceVersionMismatch(t *testing.T) {
+	cfg, _ := approvedPackRunnerTuple(t, "0.1.1", packruntime.PortableWorkerHostCommit)
+	if _, err := loadPackRunner(cfg); err == nil || !strings.Contains(err.Error(), "reviewed worker host") {
+		t.Fatalf("signed descriptor with a crossed source/version tuple activated: %v", err)
+	}
+}
+
 func writePackApproval(t *testing.T, approval packRunnerConfig) {
 	t.Helper()
 	dir, err := agentConfigDir()

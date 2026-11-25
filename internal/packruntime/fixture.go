@@ -20,8 +20,14 @@ import (
 	"github.com/deltatronix/dtx-agent/internal/boundedoutput"
 )
 
-// Only the reviewed portable UI #157 build is supported by this local fixture caller.
+// PortableWorkerHostCommit is the reviewed source for Pack core 0.1.0.
 const PortableWorkerHostCommit = "29d7f3cf0a57dd825e499760b6d36adb4842d249"
+
+// IsReviewedPortableWorker matches the Core version and Worker Host source as one tuple.
+func IsReviewedPortableWorker(d Descriptor) bool {
+	return d.PackCoreVersion == LegacyPackCoreVersion && d.WorkerHostCommit == PortableWorkerHostCommit
+}
+
 const fixtureWall = 5 * time.Second
 const fixtureMetadataBytes = 64 << 10
 const fixtureSnapshotBytes = 16 << 20
@@ -223,7 +229,7 @@ func RunFixture(ctx context.Context, descriptor []byte, binary, input string, ca
 	if err != nil {
 		return nil, err
 	}
-	if d.WorkerHostCommit != PortableWorkerHostCommit || d.Platform != runtime.GOOS+"-"+runtime.GOARCH {
+	if !IsReviewedPortableWorker(d) || d.Platform != runtime.GOOS+"-"+runtime.GOARCH {
 		return nil, errors.New("fixture requires reviewed portable worker for this platform")
 	}
 	if err := os.Chmod(executable, 0500); err != nil {
