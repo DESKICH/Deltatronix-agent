@@ -59,10 +59,29 @@ func approvedPackRunnerTuple(t *testing.T, version, commit string) (Config, pack
 	writePackApproval(t, approval)
 	return cfg, approval
 }
-func TestPackRunnerRefusesSignedSourceVersionMismatch(t *testing.T) {
-	cfg, _ := approvedPackRunnerTuple(t, "0.1.1", packruntime.PortableWorkerHostCommit)
-	if _, err := loadPackRunner(cfg); err == nil || !strings.Contains(err.Error(), "reviewed worker host") {
-		t.Fatalf("signed descriptor with a crossed source/version tuple activated: %v", err)
+func TestPackRunnerRequiresExactSignedSourceVersionTuple(t *testing.T) {
+	for _, test := range []struct {
+		version, commit string
+		approved        bool
+	}{
+		{packruntime.LegacyPackCoreVersion, packruntime.PortableWorkerHostCommit, true},
+		{"0.1.1", packruntime.PortableWorkerHostCommit011, true},
+		{packruntime.LegacyPackCoreVersion, packruntime.PortableWorkerHostCommit011, false},
+		{"0.1.1", packruntime.PortableWorkerHostCommit, false},
+	} {
+		t.Run(test.version+"/"+test.commit[:7], func(t *testing.T) {
+			cfg, _ := approvedPackRunnerTuple(t, test.version, test.commit)
+			selection, err := loadPackRunner(cfg)
+			if !test.approved {
+				if err == nil || !strings.Contains(err.Error(), "reviewed worker host") || selection != nil {
+					t.Fatalf("crossed source/version tuple activated: %v", err)
+				}
+				return
+			}
+			if err != nil || selection.registration.EngineVersions["@deltatronix/pack-core"] != test.version {
+				t.Fatalf("exact signed runtime did not register its engine version: %v", err)
+			}
+		})
 	}
 }
 

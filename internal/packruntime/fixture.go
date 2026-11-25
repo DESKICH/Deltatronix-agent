@@ -23,9 +23,19 @@ import (
 // PortableWorkerHostCommit is the reviewed source for Pack core 0.1.0.
 const PortableWorkerHostCommit = "29d7f3cf0a57dd825e499760b6d36adb4842d249"
 
+// PortableWorkerHostCommit011 is the reviewed UI #166 source for Pack core 0.1.1.
+const PortableWorkerHostCommit011 = "9ddbc1fd0c2172a48fdc80e4e0d1ba9cb6e15aad"
+
 // IsReviewedPortableWorker matches the Core version and Worker Host source as one tuple.
 func IsReviewedPortableWorker(d Descriptor) bool {
-	return d.PackCoreVersion == LegacyPackCoreVersion && d.WorkerHostCommit == PortableWorkerHostCommit
+	switch d.PackCoreVersion {
+	case LegacyPackCoreVersion:
+		return d.WorkerHostCommit == PortableWorkerHostCommit
+	case "0.1.1":
+		return d.WorkerHostCommit == PortableWorkerHostCommit011
+	default:
+		return false
+	}
 }
 
 const fixtureWall = 5 * time.Second

@@ -34,6 +34,34 @@ func packHTTPFixture(t *testing.T) (Config, *packRunnerSelection, packHTTPPolicy
 	}
 	return cfg, selection, policy, data
 }
+func TestPackHTTPPolicyRequiresExactWorkerHostAndCoreTuple(t *testing.T) {
+	cfg, _ := approvedPackRunnerTuple(t, "0.1.1", packruntime.PortableWorkerHostCommit011)
+	selection, err := loadPackRunner(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := packHTTPPolicy{JobID: "job-a", Attempt: 1, Input: packruntime.EvaluationInput{
+		UserID: "caller-a", ProjectID: "project-a", PackID: "pack-a", Version: 1, SnapshotID: "snapshot-a",
+		ContentHash: strings.Repeat("a", 64), ByteSize: 10,
+	}}
+	data, err := json.Marshal(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := validatePackHTTPPolicy(data, selection); err != nil {
+		t.Fatalf("reviewed 0.1.1 worker refused: %v", err)
+	}
+	selection.verified.WorkerHostCommit = packruntime.PortableWorkerHostCommit
+	if _, err := validatePackHTTPPolicy(data, selection); err == nil {
+		t.Fatal("HTTP execution policy accepted the old worker-host commit for 0.1.1")
+	}
+	selection.verified.WorkerHostCommit = packruntime.PortableWorkerHostCommit011
+	selection.verified.PackCoreVersion = packruntime.LegacyPackCoreVersion
+	if _, err := validatePackHTTPPolicy(data, selection); err == nil {
+		t.Fatal("HTTP execution policy accepted the new worker-host commit for 0.1.0")
+	}
+}
+
 func TestPackHTTPRequiresExactLoopbackAndPairing(t *testing.T) {
 	cfg := Config{APIURL: "http://127.0.0.1:1234", AgentID: "agent-a", AgentToken: "synthetic"}
 	if _, err := packFixtureBase(cfg, ""); err != nil {
@@ -80,17 +108,13 @@ func TestPackHTTPRenewalKeepsIdentityAndAdoptsOnlyValidExpiry(t *testing.T) {
 		t.Fatal("fresh exact fence not adopted", err)
 	}
 }
-func installPackHTTPProfile(t *testing.T, api string) (Config, packRunnerConfig, packHTTPPolicy, string) {
+func installPackHTTPProfile(t *testing.T, api, engineVersion, workerCommit string) (Config, packRunnerConfig, packHTTPPolicy, string) {
 	t.Helper()
-	cfg, approval := approvedPackRunner(t)
+	cfg, approval := approvedPackRunnerTuple(t, engineVersion, workerCommit)
 	cfg.APIURL = api
 	approval.APIURL = api
 	writePackApproval(t, approval)
 	if err := saveConfig(cfg); err != nil {
-		t.Fatal(err)
-	}
-	selection, err := loadPackRunner(cfg)
-	if err != nil {
 		t.Fatal(err)
 	}
 	raw := []byte(`{"schemaVersion":1}`)
@@ -102,9 +126,6 @@ func installPackHTTPProfile(t *testing.T, api string) (Config, packRunnerConfig,
 	}
 	path := filepath.Join(t.TempDir(), "policy.json")
 	if err = os.WriteFile(path, bytes, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := validatePackHTTPPolicy(bytes, selection); err != nil {
 		t.Fatal(err)
 	}
 	return cfg, approval, policy, path
@@ -125,7 +146,7 @@ func TestPackHTTPNoRedirectOrBlindClaimRetry(t *testing.T) {
 				w.WriteHeader(status)
 			}))
 			defer server.Close()
-			_, _, _, path := installPackHTTPProfile(t, server.URL)
+			_, _, _, path := installPackHTTPProfile(t, server.URL, packruntime.LegacyPackCoreVersion, packruntime.PortableWorkerHostCommit)
 			var out bytes.Buffer
 			if err := runPackHTTPFixture(context.Background(), []string{"--policy", path}, &out); err == nil || out.Len() != 0 {
 				t.Fatal("failed request emitted result")
@@ -137,18 +158,31 @@ func TestPackHTTPNoRedirectOrBlindClaimRetry(t *testing.T) {
 	}
 }
 func TestPackHTTPBadAssignmentNeverFetchesSnapshot(t *testing.T) {
-	calls := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "no-store")
-		w.Write([]byte(`{"contractVersion":1,"action":"pack.evaluate_snapshot","fence":{},"input":{},"task":{}}`))
-	}))
-	defer server.Close()
-	_, _, _, path := installPackHTTPProfile(t, server.URL)
-	var out bytes.Buffer
-	if err := runPackHTTPFixture(context.Background(), []string{"--policy", path}, &out); err == nil || calls != 1 || out.Len() != 0 {
-		t.Fatal("bad metadata reached byte handoff", err, calls)
+	for _, test := range []struct {
+		commit string
+		claims int
+	}{
+		{packruntime.PortableWorkerHostCommit011, 1},
+		{packruntime.PortableWorkerHostCommit, 0},
+	} {
+		t.Run(test.commit[:7], func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if r.URL.Path != "/compute/pack-jobs/job-a/claim" || r.Method != http.MethodPost {
+					t.Error("invalid assignment reached bytes or another paired endpoint")
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Cache-Control", "no-store")
+				w.Write([]byte(`{"contractVersion":1,"action":"pack.evaluate_snapshot","fence":{},"input":{},"task":{}}`))
+			}))
+			defer server.Close()
+			_, _, _, path := installPackHTTPProfile(t, server.URL, "0.1.1", test.commit)
+			var out bytes.Buffer
+			if err := runPackHTTPFixture(context.Background(), []string{"--policy", path}, &out); err == nil || calls != test.claims || out.Len() != 0 {
+				t.Fatal("reviewed tuple or metadata bypassed the claim fence", err, calls)
+			}
+		})
 	}
 }
 

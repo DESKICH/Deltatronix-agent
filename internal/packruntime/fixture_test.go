@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -242,5 +243,49 @@ func TestRunFixtureRefusesUnreviewedRuntimeAndRemovesPrivateCopies(t *testing.T)
 	entries, err := os.ReadDir(owned)
 	if err != nil || len(entries) != 0 {
 		t.Fatal("private failed run not cleaned", err)
+	}
+}
+
+func TestRunFixtureUsesExactSignedWorkerHostAndCoreTuple(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("fixture process supervision requires POSIX")
+	}
+	dir, caller, _, _ := fixtureInput(t)
+	scope, _, err := loadFixture(dir, caller)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply := fixtureResult(t, scope)
+	worker := []byte("#!/bin/sh\nprintf '%s\\n' '" + string(reply) + "'\n")
+	executable := filepath.Join(t.TempDir(), "fixture-worker")
+	if err := os.WriteFile(executable, worker, 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, baseTrust, _, key := fixture(t)
+	for _, test := range []struct {
+		version, commit string
+		approved        bool
+	}{
+		{LegacyPackCoreVersion, PortableWorkerHostCommit, true},
+		{"0.1.1", PortableWorkerHostCommit011, true},
+		{LegacyPackCoreVersion, PortableWorkerHostCommit011, false},
+		{"0.1.1", PortableWorkerHostCommit, false},
+	} {
+		t.Run(test.version+"/"+test.commit[:7], func(t *testing.T) {
+			descriptor, err := Build(strings.NewReader(string(worker)), runtime.GOOS+"-"+runtime.GOARCH, test.commit, test.version, baseTrust.KeyID, key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			trust := baseTrust
+			trust.ArtifactID, trust.Platform = descriptor.ArtifactID, descriptor.Platform
+			result, err := RunFixture(context.Background(), encoded(t, descriptor), executable, dir, caller, trust)
+			if !test.approved {
+				if err == nil || !strings.Contains(err.Error(), "reviewed portable worker") || result != nil {
+					t.Fatalf("crossed source/version tuple executed: %v", err)
+				}
+			} else if err != nil || string(result) != string(reply) {
+				t.Fatalf("approved synthetic fixture did not execute: %v", err)
+			}
+		})
 	}
 }
